@@ -1,1 +1,32 @@
+# Secrets
+.env
+
+# Python
 venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Data — nunca al repo
+data/
+
+# Modelos de voz — pesados
+data/kokoro/
+
+# Bases de datos locales
+data/iris.db
+data/chromadb/
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+keys.txt
