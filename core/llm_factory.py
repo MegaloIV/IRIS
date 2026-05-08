@@ -21,10 +21,10 @@ def get_llm() -> BaseChatModel:
         case "ollama":
             from langchain_ollama import ChatOllama
             return ChatOllama(model=model, temperature=temperature)
-        case "anthropic":
+#       case "anthropic":
             from langchain_anthropic import ChatAnthropic
             return ChatAnthropic(model=model, temperature=temperature, api_key=api_key)
-        case "openai":
+#       case "openai":
             from langchain_openai import ChatOpenAI
             return ChatOpenAI(model=model, temperature=temperature, api_key=api_key)
         case _:
