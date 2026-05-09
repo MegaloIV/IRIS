@@ -59,8 +59,9 @@ class StorageConfig(BaseModel):
 
 class VoiceConfig(BaseModel):
     # TTS — Kokoro
-    kokoro_voice: str = os.getenv("KOKORO_VOICE", "af_heart")
+    kokoro_voice: str = os.getenv("KOKORO_VOICE", "af_sarah")
     kokoro_speed: float = float(os.getenv("KOKORO_SPEED", "1.0"))
+    kokoro_device: str = os.getenv("KOKORO_DEVICE", "cuda")
 
     # STT — faster-whisper
     stt_model: str = os.getenv("STT_MODEL", "small")

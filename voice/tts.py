@@ -1,6 +1,7 @@
 """
 voice/tts.py
-Text-to-Speech con Kokoro TTS (inglés, rápido).
+Text-to-Speech con Kokoro TTS.
+Con onnxruntime-gpu instalado usa GPU automáticamente.
 Traduce español → inglés antes de sintetizar.
 """
 
@@ -77,11 +78,11 @@ class TTSEngine:
         def process_all():
             for sentence in sentences:
                 try:
-                    en      = self._translate(sentence)
+                    en          = self._translate(sentence)
                     samples, sr = self._synthesize(en)
                     audio_queue.put((samples, sr))
                 except Exception as e:
-                    logging.error(f"[TTS] Error: {e}")
+                    logging.error(f"[TTS] Error procesando: {e}")
             audio_queue.put(stop_signal)
 
         def play_all():
@@ -101,7 +102,6 @@ class TTSEngine:
         play_all()
 
     def synthesize_for_telegram(self, text_es: str) -> str:
-        """Sintetiza audio para Telegram en .ogg"""
         try:
             import soundfile as sf
             text_en     = self._translate(text_es)

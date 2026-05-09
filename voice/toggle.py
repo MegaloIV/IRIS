@@ -1,9 +1,7 @@
 """
 voice/toggle.py
-Toggle de escucha de Iris usando el botón Copilot (F23).
-
-Un toque → Iris activa su STT y te escucha
-Otro toque → Iris detiene su STT (Discord etc. libre)
+Toggle de escucha de Iris usando el boton Copilot (F23).
+Ignora activaciones multiples si ya hay una sesion activa.
 """
 
 import logging
@@ -18,9 +16,9 @@ class VoiceToggle:
     def __init__(self, on_activated: Callable, on_deactivated: Optional[Callable] = None):
         self.on_activated   = on_activated
         self.on_deactivated = on_deactivated
-        self.toggle_key     = settings.voice.wake_word  # "f23"
+        self.toggle_key     = settings.voice.wake_word
         self._running       = False
-        self.listening      = False  # público — listener.py lo consulta
+        self.listening      = False
         self._thread        = None
         self._init()
 
@@ -28,23 +26,19 @@ class VoiceToggle:
         try:
             from pynput import keyboard
             self._keyboard = keyboard
-            logging.info(f"[Toggle] Botón configurado: {self.toggle_key}")
+            logging.info(f"[Toggle] Boton configurado: {self.toggle_key}")
         except ImportError:
             raise ImportError("Instala pynput: pip install pynput")
-
-    # ─── Control ──────────────────────────────────────────────────────────────
 
     def start(self):
         self._running = True
         self._thread  = threading.Thread(target=self._listen_loop, daemon=True)
         self._thread.start()
-        print("[Toggle] Presiona el botón Copilot para activar/desactivar la escucha.")
+        print("[Toggle] Presiona el boton Copilot para activar/desactivar la escucha.")
 
     def stop(self):
         self._running  = False
         self.listening = False
-
-    # ─── Loop ─────────────────────────────────────────────────────────────────
 
     def _listen_loop(self):
         from pynput import keyboard
@@ -52,7 +46,7 @@ class VoiceToggle:
         try:
             target_key = getattr(keyboard.Key, self.toggle_key)
         except AttributeError:
-            logging.error(f"[Toggle] Tecla '{self.toggle_key}' no reconocida.")
+            logging.error(f"[Toggle] Tecla no reconocida: {self.toggle_key}")
             return
 
         def on_press(key):
@@ -61,10 +55,10 @@ class VoiceToggle:
             if key == target_key:
                 self.listening = not self.listening
                 if self.listening:
-                    print("\n[Toggle] 🎤 Iris escuchando...")
+                    print("\n[Toggle] Iris escuchando...")
                     self.on_activated()
                 else:
-                    print("\n[Toggle] 😴 Iris en silencio.")
+                    print("\n[Toggle] Iris en silencio.")
                     if self.on_deactivated:
                         self.on_deactivated()
 

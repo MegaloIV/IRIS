@@ -280,3 +280,27 @@ Relation_types son las relaciones relevantes al contexto del mensaje.
 Si no hay entidades claras devuelve listas vacías.
 
 Relaciones disponibles: LE_GUSTA, TRABAJA_CON, TRABAJA_EN, CONOCE, USA, LOGRO, ESTUDIA, VIVE_EN, HABLA_CON"""
+
+MEMORY_RELEVANCE_PROMPT = """Analiza la siguiente conversación y decide si contiene información relevante para recordar a largo plazo.
+
+CONVERSACIÓN:
+{conversation}
+
+Responde SOLO con JSON válido:
+{{
+    "relevant": true|false,
+    "reason": "breve explicación de por qué sí o no"
+}}
+
+Considera relevante si la conversación contiene:
+- Datos personales del usuario (nombre, trabajo, estudios, familia)
+- Preferencias o gustos mencionados explícitamente
+- Logros o eventos importantes
+- Proyectos o tecnologías que usa
+- Momentos especiales o chistes internos
+- Rutinas o hábitos
+
+NO es relevante si es solo:
+- Saludos y despedidas cortas
+- Conversación trivial sin datos personales
+- Pruebas del sistema ("hola", "funciona", "probando")"""
