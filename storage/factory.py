@@ -21,7 +21,7 @@ class _DummyGraphStorage(BaseGraphStorage):
     """Graph storage vacío — cuando Neo4j no está disponible."""
 
     def add_entity(self, name, entity_type, properties): pass
-    def add_relation(self, from_name, relation, to_name): pass
+    def add_relation(self, from_name, relation, to_name, properties=None): pass
     def get_context(self, entity_name, depth=2): return []
     def get_relevant_context(self, entities, relation_types, owner_name): return ""
     def get_owner_graph(self, owner_name, depth=1): return ""
