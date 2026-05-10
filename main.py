@@ -1,70 +1,97 @@
 """
 main.py
-Entry point de Iris.
+Entry point de Iris con UI flotante en la derecha.
 """
 
 import sys
 import warnings
 import signal
+import threading
+from PyQt6.QtWidgets import QApplication
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
+from ui.avatar import IrisAvatarUI, IrisSignals
 
 def main():
     print("=" * 50)
     print("  IRIS — Iniciando sistema...")
     print("=" * 50)
 
+    app = QApplication(sys.argv)
+    ui_signals = IrisSignals()
+    avatar_window = IrisAvatarUI(ui_signals)
+    avatar_window.show()
+
     from core.agent import IrisAgent
     iris = IrisAgent()
+
+    # Interceptamos solo para actualizar el estado de ánimo (las caras) ANTES de hablar
+    original_chat_stream = iris.chat_stream_voice
+    
+    def hooked_chat_stream(user_input, on_sentence):
+        changes = iris.personality.analyze_input(user_input)
+        if changes.get("mood"):
+            ui_signals.mood_updated.emit(changes["mood"].value)
+        return original_chat_stream(user_input, on_sentence)
+
+    iris.chat_stream_voice = hooked_chat_stream
 
     def shutdown(sig=None, frame=None):
         print("\n\n[Iris] Guardando memorias antes de cerrar...")
         iris.shutdown()
         print("[Iris] Hasta luego.")
+        QApplication.quit()
         sys.exit(0)
 
     signal.signal(signal.SIGINT,  shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    # Iniciar voz
     print("[Voice] Iniciando sistema de voz...")
     try:
-        iris.start_voice()
+        # Aquí inyectamos la señal para que actualice la UI al mismo tiempo que el TTS
+        iris.start_voice(on_speaking_sentence=ui_signals.text_updated.emit)
         print("[Voice] Listo — presiona el botón Copilot para hablar con Iris.")
     except Exception as e:
         print(f"[Voice] Error: {e}")
-        import traceback
-        traceback.print_exc()
         print("[Voice] Continuando en modo texto.")
 
     stats = iris.memory.get_stats()
     print(f"\n[Sistema listo] — {iris.personality.get_status_summary()}")
-    print(f"[Memoria] {stats['total_memories']} hechos | {stats['total_messages']} mensajes | STM: {iris.get_status()['stm_loaded']} cargados")
-    print("\nComandos: /status | /memoria | /guardar | /reset | /trust +N | /salir\n")
     print("-" * 50)
 
-    while True:
-        try:
-            user_input = input("\nTú: ").strip()
-            if not user_input:
-                continue
+    def terminal_loop():
+        while True:
+            try:
+                user_input = input("\nTú: ").strip()
+                if not user_input: continue
+                if user_input.startswith("/"):
+                    _handle_command(user_input, iris)
+                    continue
 
-            if user_input.startswith("/"):
-                _handle_command(user_input, iris)
-                continue
+                print("\nIris: ", end="", flush=True)
+                
+                # Si le escribes por teclado, también actualizamos su cara
+                ui_signals.mood_updated.emit(iris.personality.state.mood.value) 
+                
+                response = iris.chat(user_input)
+                print(response)
 
-            print("\nIris: ", end="", flush=True)
-            response = iris.chat(user_input)
-            print(response)
+                # Si hablas por texto, mostramos la respuesta en la UI un par de segundos
+                ui_signals.text_updated.emit(response)
+                threading.Timer(5.0, lambda: ui_signals.text_updated.emit("")).start()
+                
+                ui_signals.mood_updated.emit(iris.personality.state.mood.value)
 
-        except KeyboardInterrupt:
-            shutdown()
-        except Exception as e:
-            print(f"\n[Error] {e}")
-            import traceback
-            traceback.print_exc()
+            except KeyboardInterrupt:
+                QApplication.instance().quit()
+                break
+            except Exception as e:
+                print(f"\n[Error] {e}")
+
+    threading.Thread(target=terminal_loop, daemon=True).start()
+    sys.exit(app.exec())
 
 
 def _handle_command(cmd: str, iris):
@@ -118,7 +145,7 @@ def _handle_command(cmd: str, iris):
             print("\n[Iris] Guardando memorias...")
             iris.shutdown()
             print("[Iris] Hasta luego.")
-            sys.exit(0)
+            QApplication.instance().quit() # Cerrar la interfaz correctamente
 
         case _:
             print(f"[Sistema] Comando desconocido: {command}")

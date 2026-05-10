@@ -1,7 +1,6 @@
 """
 voice/listener.py
 Orquestador de voz con toggle y deteccion de silencio.
-Un solo loop activo a la vez — multiples toques del toggle son ignorados.
 """
 
 import logging
@@ -16,11 +15,13 @@ from voice.toggle import VoiceToggle
 
 class VoiceListener:
 
-    def __init__(self, on_text_input: Callable):
+    # Añadimos on_speaking_sentence al constructor
+    def __init__(self, on_text_input: Callable, on_speaking_sentence: Callable = None):
         self.on_text_input = on_text_input
+        self.on_speaking_sentence = on_speaking_sentence
         self.stt           = STTEngine()
         self.tts           = TTSEngine()
-        self._loop_lock    = threading.Lock()  # garantiza un solo loop activo
+        self._loop_lock    = threading.Lock()
 
         self.toggle = VoiceToggle(
             on_activated   = self._on_toggle_on,
@@ -46,8 +47,6 @@ class VoiceListener:
 
     def _listen_loop(self):
         with self._loop_lock:
-            logging.info("[Voice] Loop de escucha iniciado.")
-
             while self.toggle.listening:
                 try:
                     text = self.stt.record_and_transcribe(
@@ -65,8 +64,6 @@ class VoiceListener:
                 except Exception as e:
                     logging.error(f"[Voice] Error en loop: {e}")
                     break
-
-            logging.info("[Voice] Loop de escucha detenido.")
 
     def _respond(self, text: str):
         sentence_queue = queue.Queue()
@@ -89,14 +86,20 @@ class VoiceListener:
         while True:
             item = sentence_queue.get()
             if item is stop_signal:
+                # Ocultar globo de texto al terminar de hablar
+                if self.on_speaking_sentence:
+                    self.on_speaking_sentence("")
                 break
             try:
-                self.tts.speak(item)
+                # Mostrar texto EXACTAMENTE antes de reproducirlo
+                if self.on_speaking_sentence:
+                    self.on_speaking_sentence(item)
+                    
+                self.tts.speak(item) # Esto bloquea hasta que termina la frase
             except Exception as e:
                 logging.error(f"[Voice] Error TTS: {e}")
 
     def speak(self, text: str):
-        """Para mensajes proactivos — siempre habla sin importar toggle."""
         threading.Thread(target=self.tts.speak, args=(text,), daemon=True).start()
 
     def synthesize_for_telegram(self, text: str) -> str:

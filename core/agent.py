@@ -210,9 +210,12 @@ class IrisAgent:
 
     # ─── Voz ──────────────────────────────────────────────────────────────────
 
-    def start_voice(self):
+    def start_voice(self, on_speaking_sentence=None):
         from voice.listener import VoiceListener
-        self._voice = VoiceListener(on_text_input=self.chat_stream_voice)
+        self._voice = VoiceListener(
+            on_text_input=self.chat_stream_voice,
+            on_speaking_sentence=on_speaking_sentence
+        )
         self._voice.start()
         print("[Iris] Sistema de voz activo.")
 
