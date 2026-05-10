@@ -55,7 +55,7 @@ class Neo4jGraphStorage(BaseGraphStorage):
         with self.driver.session() as session:
             session.execute_write(_add_entity_tx)
 
-    def add_relation(self, from_name: str, relation: str, to_name: str) -> None:
+    def add_relation(self, from_name: str, relation: str, to_name: str, properties: dict = None) -> None:
         def _add_relation_tx(tx):
             tx.run(
                 f"""
@@ -104,8 +104,10 @@ class Neo4jGraphStorage(BaseGraphStorage):
                     e.name AS source,
                     type(r) AS relation,
                     related.name AS target,
-                    related.type AS target_type
-                LIMIT 20
+                    related.type AS target_type,
+                    r.context AS rel_context,
+                    r.date AS rel_date
+                LIMIT 30
                 """,
                 name=entity_name,
             )
@@ -161,7 +163,14 @@ class Neo4jGraphStorage(BaseGraphStorage):
             key = f"{row['source']}-{row['relation']}-{row['target']}"
             if key not in seen:
                 seen.add(key)
-                lines.append(f"- {row['source']} {row['relation']} {row['target']}")
+                
+                # Construir metadatos si existen
+                meta = []
+                if row.get('rel_date'): meta.append(f"Fecha: {row['rel_date']}")
+                if row.get('rel_context'): meta.append(f"Detalle: {row['rel_context']}")
+                
+                meta_str = f" ({' | '.join(meta)})" if meta else ""
+                lines.append(f"- {row['source']} {row['relation']} {row['target']}{meta_str}")
 
         return "\n".join(lines)
 

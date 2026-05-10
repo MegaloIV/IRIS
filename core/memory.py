@@ -193,6 +193,7 @@ class MemoryManager:
             prompt   = GRAPH_EXTRACTION_PROMPT.format(
                 owner_name   = self.owner_name,
                 conversation = conversation,
+                current_date = current_date,
             )
             response = self.analysis_llm.invoke(prompt)
             content  = response.content.strip().replace("```json", "").replace("```", "").strip()
@@ -210,6 +211,7 @@ class MemoryManager:
                     from_name = rel["from"],
                     relation  = _sanitize_relation(rel["relation"]),
                     to_name   = rel["to"],
+                    properties = rel.get("properties", {}),
                 )
 
             logging.info("[Memory] Grafo actualizado.")
