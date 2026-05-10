@@ -1,6 +1,7 @@
 """
 storage/neo4j.py
 Implementación de grafo de conocimiento usando Neo4j AuraDB.
+(Actualizado con auto-reconexión y silenciador de warnings)
 """
 
 import logging
@@ -11,6 +12,8 @@ from neo4j import GraphDatabase
 from config.settings import settings
 from storage.base import BaseGraphStorage
 
+# Silenciar el spam de advertencias de Neo4j cuando una relación no existe en el grafo
+logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
 
 class Neo4jGraphStorage(BaseGraphStorage):
 
@@ -18,16 +21,21 @@ class Neo4jGraphStorage(BaseGraphStorage):
         self.driver = GraphDatabase.driver(
             settings.storage.neo4j_uri,
             auth=(settings.storage.neo4j_user, settings.storage.neo4j_password),
+            # Ajustes recomendados para mantener conexiones en AuraDB
+            max_connection_lifetime=30 * 60,
+            keep_alive=True
         )
         self._init_constraints()
         logging.info("[Neo4j] Conectado a AuraDB.")
 
     def _init_constraints(self):
-        with self.driver.session() as session:
-            session.run(
+        def _create_constraint(tx):
+            tx.run(
                 "CREATE CONSTRAINT entity_name IF NOT EXISTS "
                 "FOR (e:Entity) REQUIRE e.name IS UNIQUE"
             )
+        with self.driver.session() as session:
+            session.execute_write(_create_constraint)
 
     def close(self):
         self.driver.close()
@@ -35,8 +43,8 @@ class Neo4jGraphStorage(BaseGraphStorage):
     # ─── Escritura ────────────────────────────────────────────────────────────
 
     def add_entity(self, name: str, entity_type: str, properties: dict) -> None:
-        with self.driver.session() as session:
-            session.run(
+        def _add_entity_tx(tx):
+            tx.run(
                 """
                 MERGE (e:Entity {name: $name})
                 SET e.type = $type, e.updated_at = datetime()
@@ -44,10 +52,12 @@ class Neo4jGraphStorage(BaseGraphStorage):
                 """,
                 name=name, type=entity_type, properties=properties,
             )
+        with self.driver.session() as session:
+            session.execute_write(_add_entity_tx)
 
     def add_relation(self, from_name: str, relation: str, to_name: str) -> None:
-        with self.driver.session() as session:
-            session.run(
+        def _add_relation_tx(tx):
+            tx.run(
                 f"""
                 MERGE (a:Entity {{name: $from_name}})
                 MERGE (b:Entity {{name: $to_name}})
@@ -56,12 +66,14 @@ class Neo4jGraphStorage(BaseGraphStorage):
                 """,
                 from_name=from_name, to_name=to_name,
             )
+        with self.driver.session() as session:
+            session.execute_write(_add_relation_tx)
 
     # ─── Consultas ────────────────────────────────────────────────────────────
 
     def get_context(self, entity_name: str, depth: int = 2) -> list[dict]:
-        with self.driver.session() as session:
-            result = session.run(
+        def _get_context_tx(tx):
+            result = tx.run(
                 f"""
                 MATCH path = (e:Entity {{name: $name}})-[*1..{depth}]-(related)
                 RETURN
@@ -74,14 +86,18 @@ class Neo4jGraphStorage(BaseGraphStorage):
                 name=entity_name,
             )
             return [dict(r) for r in result]
+            
+        with self.driver.session() as session:
+            return session.execute_read(_get_context_tx)
 
     def get_context_by_relation(self, entity_name: str, relation_types: list[str]) -> list[dict]:
         if not relation_types:
             return self.get_context(entity_name, depth=1)
 
         relation_filter = "|".join(relation_types)
-        with self.driver.session() as session:
-            result = session.run(
+        
+        def _get_ctx_rel_tx(tx):
+            result = tx.run(
                 f"""
                 MATCH (e:Entity {{name: $name}})-[r:{relation_filter}]-(related)
                 RETURN
@@ -94,11 +110,13 @@ class Neo4jGraphStorage(BaseGraphStorage):
                 name=entity_name,
             )
             return [dict(r) for r in result]
+            
+        with self.driver.session() as session:
+            return session.execute_read(_get_ctx_rel_tx)
 
     def search_entities(self, search_term: str) -> list[dict]:
-        """Busca entidades por nombre parcial."""
-        with self.driver.session() as session:
-            result = session.run(
+        def _search_entities_tx(tx):
+            result = tx.run(
                 """
                 MATCH (e:Entity)
                 WHERE toLower(e.name) CONTAINS toLower($search_term)
@@ -108,6 +126,9 @@ class Neo4jGraphStorage(BaseGraphStorage):
                 search_term=search_term,
             )
             return [dict(r) for r in result]
+            
+        with self.driver.session() as session:
+            return session.execute_read(_search_entities_tx)
 
     def get_relevant_context(
         self,

@@ -1,7 +1,7 @@
 """
 voice/tts.py
-Text-to-Speech con Kokoro TTS (inglés, rápido).
-Traduce español → inglés antes de sintetizar.
+Text-to-Speech con ElevenLabs (multilingüe).
+Incluye rotación automática de API Keys.
 """
 
 import logging
@@ -11,6 +11,7 @@ import threading
 import queue
 import re
 import numpy as np
+import requests
 
 from config.settings import settings
 
@@ -23,53 +24,90 @@ def _split_sentences(text: str) -> list[str]:
 class TTSEngine:
 
     def __init__(self):
-        self.voice      = settings.voice.kokoro_voice
-        self.speed      = settings.voice.kokoro_speed
-        self._kokoro    = None
-        self._trans_llm = None
-        self._init_model()
-        self._init_translator()
+        # Cargar keys
+        keys_env = settings.voice.elevenlabs_keys
+        self.api_keys = [k.strip() for k in keys_env.split(",") if k.strip()]
+        
+        # Cargar IDs de voz
+        ids_env = settings.voice.elevenlabs_voice_ids
+        self.voice_ids = [v.strip() for v in ids_env.split(",") if v.strip()]
+        
+        self.current_key_index = 0
 
-    def _init_model(self):
-        try:
-            from kokoro_onnx import Kokoro
-            logging.info("[TTS] Cargando Kokoro TTS...")
-            self._kokoro = Kokoro(
-                "data/kokoro/kokoro-v0_19.fp16.onnx",
-                "data/kokoro/voices.bin",
-            )
-            logging.info(f"[TTS] Kokoro listo — voz: {self.voice}")
-        except ImportError:
-            raise ImportError("Instala kokoro: pip install kokoro-onnx")
-        except Exception as e:
-            raise RuntimeError(f"[TTS] Error cargando Kokoro: {e}")
+        if not self.api_keys:
+            logging.warning("[TTS] ADVERTENCIA: No se configuraron ELEVENLABS_KEYS en el .env")
+        else:
+            logging.info(f"[TTS] ElevenLabs listo con {len(self.api_keys)} API keys cargadas.")
 
-    def _init_translator(self):
-        from core.llm_factory import get_analysis_llm
-        self._trans_llm = get_analysis_llm()
+    def _get_current_key(self) -> str:
+        if not self.api_keys:
+            return ""
+        return self.api_keys[self.current_key_index]
 
-    def _translate(self, text: str) -> str:
-        try:
-            from config.prompts import TRANSLATION_PROMPT
-            response = self._trans_llm.invoke(TRANSLATION_PROMPT.format(text=text))
-            return response.content.strip()
-        except Exception as e:
-            logging.error(f"[TTS] Error traduciendo: {e}")
-            return text
+    def _rotate_key(self):
+        self.current_key_index += 1
+        if self.current_key_index >= len(self.api_keys):
+            raise Exception("Se han agotado todas las API keys de ElevenLabs (Límite de cuota o bloqueadas).")
+        logging.info(f"[TTS] Rotando a API Key {self.current_key_index + 1}/{len(self.api_keys)}")
 
-    def _synthesize(self, text_en: str) -> tuple[np.ndarray, int]:
-        samples, sr = self._kokoro.create(
-            text_en,
-            voice = self.voice,
-            speed = self.speed,
-            lang  = "en-us",
-        )
-        return samples, sr
+    def _synthesize(self, text: str) -> tuple[np.ndarray, int]:
+        """Sintetiza audio y devuelve un array NumPy y el sample rate."""
+        while True:
+            api_key = self._get_current_key()
+            
+            # CORRECCIÓN 1: Obtener el Voice ID que le corresponde a la API Key actual
+            if hasattr(self, 'voice_ids') and self.voice_ids:
+                current_voice_id = self.voice_ids[self.current_key_index] if self.current_key_index < len(self.voice_ids) else self.voice_ids[0]
+            else:
+                # Fallback por si acaso no cambiaste el __init__
+                current_voice_id = self.voice_id 
+
+            # Pedimos formato pcm_24000 para que sea compatible directo con sounddevice
+            url = f"https://api.elevenlabs.io/v1/text-to-speech/{current_voice_id}?output_format=pcm_24000"
+            
+            headers = {
+                "Accept": "audio/pcm",
+                "Content-Type": "application/json",
+                "xi-api-key": api_key
+            }
+            
+            data = {
+                "text": text,
+                "model_id": "eleven_multilingual_v2", # Soporta español nativo
+                "voice_settings": {
+                    "stability": 0.5,
+                    "similarity_boost": 0.75
+                }
+            }
+
+            try:
+                response = requests.post(url, json=data, headers=headers)
+
+                if response.status_code == 200:
+                    # Convertir los bytes PCM de 16 bits a float32 (lo que espera sounddevice)
+                    audio_data = np.frombuffer(response.content, dtype=np.int16)
+                    audio_float = audio_data.astype(np.float32) / 32768.0
+                    return audio_float, 24000
+                
+                # CORRECCIÓN 2: Se agregó el error 402 a la lista de rotación
+                elif response.status_code in [401, 402, 429]:
+                    logging.warning(f"[TTS] Falló key {self.current_key_index + 1} (Status {response.status_code}). Rotando...")
+                    self._rotate_key()
+                else:
+                    logging.error(f"[TTS] Error API ElevenLabs ({response.status_code}): {response.text}")
+                    return np.array([]), 24000
+                    
+            except Exception as e:
+                if "agotado" in str(e).lower():
+                    raise e
+                logging.error(f"[TTS] Error de red al contactar ElevenLabs: {e}")
+                return np.array([]), 24000
 
     def speak(self, text_es: str):
         if not text_es.strip():
             return
 
+        # Ya no necesitamos traducir, pasamos el español directo
         sentences   = _split_sentences(text_es)
         audio_queue = queue.Queue()
         stop_signal = object()
@@ -77,9 +115,9 @@ class TTSEngine:
         def process_all():
             for sentence in sentences:
                 try:
-                    en      = self._translate(sentence)
-                    samples, sr = self._synthesize(en)
-                    audio_queue.put((samples, sr))
+                    samples, sr = self._synthesize(sentence)
+                    if len(samples) > 0:
+                        audio_queue.put((samples, sr))
                 except Exception as e:
                     logging.error(f"[TTS] Error: {e}")
             audio_queue.put(stop_signal)
@@ -97,6 +135,7 @@ class TTSEngine:
             except Exception as e:
                 logging.error(f"[TTS] Error reproduciendo: {e}")
 
+        # Sintetizamos y reproducimos en paralelo para menor latencia
         threading.Thread(target=process_all, daemon=True).start()
         play_all()
 
@@ -104,8 +143,10 @@ class TTSEngine:
         """Sintetiza audio para Telegram en .ogg"""
         try:
             import soundfile as sf
-            text_en     = self._translate(text_es)
-            samples, sr = self._synthesize(text_en)
+            samples, sr = self._synthesize(text_es)
+
+            if len(samples) == 0:
+                return ""
 
             tmp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             tmp_wav.close()

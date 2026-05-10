@@ -1,6 +1,7 @@
 """
 core/memory.py
 Memoria de Iris — STM + LTM vectorial (Supabase) + LTM grafo (Neo4j).
+Extrae memorias cada 30 mensajes usando un agente que decide si es relevante.
 """
 
 import json
@@ -17,6 +18,7 @@ from config.prompts import (
     MEMORY_CONTEXT_PROMPT,
     GRAPH_EXTRACTION_PROMPT,
     GRAPH_QUERY_PROMPT,
+    MEMORY_RELEVANCE_PROMPT,
 )
 
 
@@ -48,13 +50,14 @@ def _relative_date(date_str) -> str:
 
 
 def _sanitize_relation(relation: str) -> str:
-    """Elimina tildes y caracteres especiales de nombres de relaciones Neo4j."""
     normalized = unicodedata.normalize("NFD", relation)
     sanitized  = "".join(c for c in normalized if unicodedata.category(c) != "Mn")
     return sanitized.upper().replace(" ", "_")
 
 
 class MemoryManager:
+
+    EXTRACT_EVERY = 30  # mensajes entre extracciones
 
     def __init__(self, analysis_llm, storage):
         self.analysis_llm = analysis_llm
@@ -65,11 +68,9 @@ class MemoryManager:
 
         self._session_buffer: list[dict] = []
         self._session_timer: Optional[threading.Timer] = None
+        self._message_count = 0  # contador para extracción cada N mensajes
 
-        logging.info(
-            f"[Memory] Iniciada — "
-            f"{self.storage.vector.count()} memorias vectoriales"
-        )
+        logging.info(f"[Memory] Iniciada — {self.storage.vector.count()} memorias vectoriales")
 
     # ─── Sesión activa ────────────────────────────────────────────────────────
 
@@ -77,30 +78,76 @@ class MemoryManager:
         msg = {"role": role, "content": content, "timestamp": datetime.now().isoformat()}
         self._session_buffer.append(msg)
         self.storage.history.save_message(role, content)
+        self._message_count += 1
+
+        # Cada 30 mensajes, el agente decide si hay algo relevante
+        if self._message_count >= self.EXTRACT_EVERY:
+            self._message_count = 0
+            buffer = self._session_buffer.copy()
+            # Correr en background para no bloquear la conversación
+            threading.Thread(
+                target=self._check_and_extract,
+                args=(buffer,),
+                daemon=True,
+            ).start()
+
+        # Timer de sesión como respaldo
         self._reset_session_timer()
 
     def _reset_session_timer(self):
         if self._session_timer:
             self._session_timer.cancel()
-        if len(self._session_buffer) >= 4:
-            timer = threading.Timer(self.timeout_mins * 60, self._close_session)
-            timer.daemon = True
-            timer.start()
-            self._session_timer = timer
+        timer = threading.Timer(self.timeout_mins * 60, self._close_session)
+        timer.daemon = True
+        timer.start()
+        self._session_timer = timer
 
     def _close_session(self):
         if not self._session_buffer:
             return
-        logging.info("[Memory] Sesión cerrada — extrayendo memorias...")
+        logging.info("[Memory] Sesión cerrada por inactividad — extrayendo memorias...")
         buffer = self._session_buffer.copy()
         self._session_buffer = []
         self._session_timer  = None
+        self._message_count  = 0
         self._extract_and_store(buffer)
 
     def force_close_session(self):
         if self._session_timer:
             self._session_timer.cancel()
         self._close_session()
+
+    # ─── Agente de relevancia ─────────────────────────────────────────────────
+
+    def _check_and_extract(self, buffer: list[dict]):
+        """
+        El agente revisa los últimos N mensajes y decide
+        si hay algo relevante que valga guardar.
+        """
+        conversation = "\n".join(
+            f"{msg['role'].capitalize()}: {msg['content']}"
+            for msg in buffer
+        )
+
+        try:
+            prompt   = MEMORY_RELEVANCE_PROMPT.format(
+                owner_name   = self.owner_name,
+                conversation = conversation,
+            )
+            response = self.analysis_llm.invoke(prompt)
+            content  = response.content.strip().replace("```json", "").replace("```", "").strip()
+            result   = json.loads(content)
+
+            if result.get("relevant", False):
+                logging.info("[Memory] Agente detectó contenido relevante — extrayendo...")
+                self._extract_and_store(buffer)
+            else:
+                logging.info(f"[Memory] Agente: sin relevancia suficiente ({result.get('reason', '')})")
+
+        except Exception as e:
+            logging.error(f"[Memory] Error en agente de relevancia: {e}")
+            # Si falla el agente, extraer de todas formas por seguridad
+            self._extract_and_store(buffer)
 
     # ─── Extracción ───────────────────────────────────────────────────────────
 
@@ -159,11 +206,9 @@ class MemoryManager:
                 )
 
             for rel in graph.get("relations", []):
-                # Sanitizar relación — elimina tildes aunque el LLM las incluya
-                relation = _sanitize_relation(rel["relation"])
                 self.storage.graph.add_relation(
                     from_name = rel["from"],
-                    relation  = relation,
+                    relation  = _sanitize_relation(rel["relation"]),
                     to_name   = rel["to"],
                 )
 
@@ -171,7 +216,7 @@ class MemoryManager:
         except Exception as e:
             logging.error(f"[Memory] Error extracción grafo: {e}")
 
-    # ─── Recuperación inteligente ─────────────────────────────────────────────
+    # ─── Recuperación ─────────────────────────────────────────────────────────
 
     def _extract_query_entities(self, text: str) -> dict:
         try:
@@ -184,7 +229,7 @@ class MemoryManager:
                 "relation_types": [_sanitize_relation(r) for r in result.get("relation_types", [])],
             }
         except Exception as e:
-            logging.warning(f"[Memory] Error extrayendo entidades del query: {e}")
+            logging.warning(f"[Memory] Error extrayendo entidades: {e}")
             return {"entities": [], "relation_types": []}
 
     def get_relevant_memories(self, query: str, n_results: int = 5) -> str:

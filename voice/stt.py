@@ -1,6 +1,8 @@
 """
 voice/stt.py
 Speech-to-Text usando faster-whisper.
+Graba con deteccion de silencio.
+silence_threshold bajo (0.005) para micros de laptop.
 """
 
 import logging
@@ -46,21 +48,62 @@ class STTEngine:
             logging.error(f"[STT] Error: {e}")
             return ""
 
-    def record_and_transcribe(self, duration: float = 5.0) -> str:
+    def record_and_transcribe(
+        self,
+        duration: float          = 30.0,
+        silence_threshold: float = 0.005,
+        silence_duration: float  = 1.5,
+        stop_flag                = None,
+        sample_rate: int         = 16000,
+    ) -> str:
+        """
+        Graba hasta detectar silencio sostenido o stop_flag=True.
+        stop_flag: callable que retorna True cuando el toggle se apaga.
+        """
         try:
             import sounddevice as sd
             import soundfile as sf
 
-            sample_rate = 16000
-            audio = sd.rec(int(duration * sample_rate), samplerate=sample_rate, channels=1, dtype="float32")
-            sd.wait()
+            chunk_size     = int(sample_rate * 0.1)
+            silence_chunks = int(silence_duration / 0.1)
+            max_chunks     = int(duration / 0.1)
 
+            audio_buffer   = []
+            silent_count   = 0
+            voice_detected = False
+
+            with sd.InputStream(samplerate=sample_rate, channels=1, dtype="float32") as stream:
+                for _ in range(max_chunks):
+                    if stop_flag and stop_flag():
+                        logging.info("[STT] Toggle apagado — procesando lo grabado...")
+                        break
+
+                    chunk, _ = stream.read(chunk_size)
+                    chunk_flat = chunk.flatten()
+                    audio_buffer.append(chunk_flat)
+
+                    rms = float(np.sqrt(np.mean(chunk_flat ** 2)))
+
+                    if rms > silence_threshold:
+                        voice_detected = True
+                        silent_count   = 0
+                    elif voice_detected:
+                        silent_count += 1
+                        if silent_count >= silence_chunks:
+                            logging.info("[STT] Silencio detectado — procesando...")
+                            break
+
+            if not voice_detected or not audio_buffer:
+                return ""
+
+            full_audio = np.concatenate(audio_buffer)
             tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             tmp.close()
-            sf.write(tmp.name, audio.flatten(), sample_rate)
+            sf.write(tmp.name, full_audio, sample_rate)
             result = self.transcribe_file(tmp.name)
             os.unlink(tmp.name)
             return result
+
         except Exception as e:
             logging.error(f"[STT] Error grabando: {e}")
             return ""

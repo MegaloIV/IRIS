@@ -38,4 +38,5 @@ def get_analysis_llm() -> BaseChatModel:
         model       = settings.llm.analysis_model,
         temperature = 0.0,
         api_key     = settings.llm.api_key,
+        model_kwargs={"response_format": {"type": "json_object"}}
     )
