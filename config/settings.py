@@ -58,10 +58,9 @@ class StorageConfig(BaseModel):
 
 
 class VoiceConfig(BaseModel):
-    # TTS — Kokoro
-    kokoro_voice: str = os.getenv("KOKORO_VOICE", "af_sarah")
-    kokoro_speed: float = float(os.getenv("KOKORO_SPEED", "1.0"))
-    kokoro_device: str = os.getenv("KOKORO_DEVICE", "cuda")
+    # TTS — ElevenLabs
+    elevenlabs_keys: str = os.getenv("ELEVENLABS_KEYS", "")
+    elevenlabs_voice_ids: str = os.getenv("ELEVENLABS_VOICE_IDS", "21m00Tcm4TlvDq8ikWAM") # Rachel por defecto
 
     # STT — faster-whisper
     stt_model: str = os.getenv("STT_MODEL", "small")
@@ -70,7 +69,6 @@ class VoiceConfig(BaseModel):
 
     # Toggle — botón Copilot
     wake_word: str = os.getenv("WAKE_WORD", "f23")
-
 
 class ServerConfig(BaseModel):
     host: str = os.getenv("SERVER_HOST", "0.0.0.0")
