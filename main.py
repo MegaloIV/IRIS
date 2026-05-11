@@ -1,6 +1,6 @@
 """
 main.py
-Entry point de Iris con UI flotante en la derecha.
+Entry point de Iris con UI flotante estática y terminal integrada.
 """
 
 import sys
@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import QApplication
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
-from ui.avatar import IrisAvatarUI, IrisSignals
+from ui.avatar import IrisAvatarUI, IrisSignals, TerminalOutputUI
 
 def main():
     print("=" * 50)
@@ -21,13 +21,16 @@ def main():
 
     app = QApplication(sys.argv)
     ui_signals = IrisSignals()
+    
     avatar_window = IrisAvatarUI(ui_signals)
+    terminal_window = TerminalOutputUI()
+    
     avatar_window.show()
+    ui_signals.terminal_output_updated.connect(terminal_window.show_message)
 
     from core.agent import IrisAgent
     iris = IrisAgent()
 
-    # Interceptamos solo para actualizar el estado de ánimo (las caras) ANTES de hablar
     original_chat_stream = iris.chat_stream_voice
     
     def hooked_chat_stream(user_input, on_sentence):
@@ -50,7 +53,6 @@ def main():
 
     print("[Voice] Iniciando sistema de voz...")
     try:
-        # Aquí inyectamos la señal para que actualice la UI al mismo tiempo que el TTS
         iris.start_voice(on_speaking_sentence=ui_signals.text_updated.emit)
         print("[Voice] Listo — presiona el botón Copilot para hablar con Iris.")
     except Exception as e:
@@ -61,27 +63,50 @@ def main():
     print(f"\n[Sistema listo] — {iris.personality.get_status_summary()}")
     print("-" * 50)
 
+    def handle_ui_input(user_input):
+        print(f"\nTú (UI): {user_input}")
+        
+        if user_input.startswith("/"):
+            cmd_output = _handle_command(user_input, iris)
+            ui_signals.terminal_output_updated.emit(cmd_output)
+            return
+
+        def worker():
+            try:
+                ui_signals.mood_updated.emit(iris.personality.state.mood.value) 
+                
+                response = iris.chat(user_input)
+                print(f"Iris: {response}")
+                
+                # Emitimos la respuesta al globo blanco. 
+                # La UI se encarga de mostrarla y ocultarla automáticamente.
+                ui_signals.text_updated.emit(response)
+                ui_signals.mood_updated.emit(iris.personality.state.mood.value)
+            except Exception as e:
+                print(f"\n[Error UI Input] {e}")
+                ui_signals.text_updated.emit(f"[Error]\n{str(e)}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    ui_signals.user_text_submitted.connect(handle_ui_input)
+
     def terminal_loop():
         while True:
             try:
                 user_input = input("\nTú: ").strip()
                 if not user_input: continue
                 if user_input.startswith("/"):
-                    _handle_command(user_input, iris)
+                    output = _handle_command(user_input, iris)
+                    print(output)
                     continue
 
                 print("\nIris: ", end="", flush=True)
-                
-                # Si le escribes por teclado, también actualizamos su cara
                 ui_signals.mood_updated.emit(iris.personality.state.mood.value) 
                 
                 response = iris.chat(user_input)
                 print(response)
 
-                # Si hablas por texto, mostramos la respuesta en la UI un par de segundos
                 ui_signals.text_updated.emit(response)
-                threading.Timer(5.0, lambda: ui_signals.text_updated.emit("")).start()
-                
                 ui_signals.mood_updated.emit(iris.personality.state.mood.value)
 
             except KeyboardInterrupt:
@@ -93,63 +118,61 @@ def main():
     threading.Thread(target=terminal_loop, daemon=True).start()
     sys.exit(app.exec())
 
-
-def _handle_command(cmd: str, iris):
+def _handle_command(cmd: str, iris) -> str:
     parts   = cmd.strip().split()
     command = parts[0].lower()
+    out = [] 
 
     match command:
         case "/status":
             s = iris.get_status()
-            print(f"\n  Mood:         {s['mood']}")
-            print(f"  Trust:        {s['trust_level']:.1f}/100 ({s['trust_stage']})")
-            print(f"  Te llama:     {s['owner_address']}")
-            print(f"  Memorias LTM: {s['total_memories']}")
-            print(f"  Mensajes DB:  {s['total_messages']}")
-            print(f"  STM cargado:  {s['stm_loaded']} mensajes")
-            print(f"  Sesión:       {s['session_messages']} mensajes en buffer")
-            print(f"  Voz activa:   {s['voice_active']}")
+            out.append(f"Mood: {s['mood']}")
+            out.append(f"Trust: {s['trust_level']:.1f}/100 ({s['trust_stage']})")
+            out.append(f"User: {s['owner_address']}")
+            out.append(f"DB Msgs: {s['total_messages']}")
+            out.append(f"Voz: {s['voice_active']}")
 
         case "/memoria":
             memories = iris.memory.get_all_memories()
             if not memories:
-                print("\n[Memoria] Sin memorias almacenadas todavía.")
+                out.append("Sin memorias.")
             else:
-                print(f"\n[Memoria] {len(memories)} memorias:\n")
-                for i, m in enumerate(memories, 1):
+                out.append(f"{len(memories)} memorias:")
+                for i, m in enumerate(memories[-3:], 1):
                     importance = "⭐" * m.get("importance", 1)
                     category   = m.get("category", "?")
-                    date_label = m.get("date_label", "")
-                    date_str   = f" — {date_label}" if date_label else ""
-                    print(f"  {i}. [{category}] {m['content']}{date_str} {importance}")
+                    content = (m['content'][:30] + '..') if len(m['content']) > 30 else m['content']
+                    out.append(f" {i}. [{category}] {content} {importance}")
 
         case "/guardar":
-            print("[Memoria] Forzando extracción...")
+            out.append("Forzando extracción...")
             iris.memory.force_close_session()
-            print("[Memoria] Listo. Usa /memoria para ver qué extrajo.")
+            out.append("Listo. Forzado.")
 
         case "/reset":
             iris.reset_conversation()
-            print("[Sistema] Conversación reiniciada.")
+            out.append("Conversación reiniciada.")
 
         case "/trust":
             if len(parts) >= 2:
                 try:
                     amount = float(parts[1])
                     iris.personality.adjust_trust(amount, "ajuste manual")
-                    print(f"[Debug] Trust → {iris.personality.state.trust_level:.1f}")
+                    out.append(f"Trust → {iris.personality.state.trust_level:.1f}")
                 except ValueError:
-                    print("[Error] Uso: /trust +10 o /trust -5")
+                    out.append("Error. Uso: /trust +10")
+            else:
+                out.append("Error. Uso: /trust +10")
 
         case "/salir":
-            print("\n[Iris] Guardando memorias...")
+            out.append("Guardando y cerrando...")
             iris.shutdown()
-            print("[Iris] Hasta luego.")
-            QApplication.instance().quit() # Cerrar la interfaz correctamente
+            QApplication.instance().quit()
 
         case _:
-            print(f"[Sistema] Comando desconocido: {command}")
+            out.append(f"Comando desconocido: {command}")
 
+    return "\n".join(out)
 
 if __name__ == "__main__":
     main()
