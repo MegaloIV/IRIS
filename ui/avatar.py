@@ -31,6 +31,7 @@ class IrisAvatarUI(QWidget):
         self.signals.text_updated.connect(self.update_subtitles)
         self.signals.mood_updated.connect(self.update_avatar)
         self.signals.listening_changed.connect(self._on_listening_changed)
+        self.signals.claude_thinking_changed.connect(self._on_claude_thinking_changed)
 
     def _init_ui(self):
         self.setWindowFlags(
@@ -113,6 +114,21 @@ class IrisAvatarUI(QWidget):
 
         self.settings_panel.btn_voice.clicked.connect(lambda: self._on_mode_set(True))
         self.settings_panel.btn_text_mode.clicked.connect(lambda: self._on_mode_set(False))
+
+        # Claude Code thinking indicator (hidden by default)
+        self.claude_indicator = QLabel("\u26a1 Consultando Claude...")
+        self.claude_indicator.setStyleSheet("""
+            QLabel {
+                background-color: rgba(204, 102, 0, 210);
+                color: white;
+                border-radius: 7px;
+                padding: 2px 7px;
+                font-size: 9px;
+                font-weight: bold;
+            }
+        """)
+        self.claude_indicator.setVisible(False)
+        avatar_inner.insertWidget(0, self.claude_indicator)
 
         upper_row.addWidget(self.bubble_renderer)
         upper_row.addWidget(avatar_container)
@@ -229,6 +245,9 @@ class IrisAvatarUI(QWidget):
                 "background-color: #FF4444; border-radius: 5px; border: none;"
             )
             self.listening_dot.setToolTip("No escuchando")
+
+    def _on_claude_thinking_changed(self, thinking: bool):
+        self.claude_indicator.setVisible(thinking)
 
     def update_subtitles(self, text: str):
         logger.debug("update_subtitles: type=%s len=%d repr=%r",

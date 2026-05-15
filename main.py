@@ -78,9 +78,17 @@ def main():
 
         def worker():
             try:
+                from core.claude_delegate import needs_delegation
                 ui_signals.mood_updated.emit(iris.personality.state.mood.value)
 
-                response = iris.chat(user_input)
+                should_delegate, file_path = needs_delegation(user_input)
+                if should_delegate:
+                    ui_signals.claude_thinking_changed.emit(True)
+                    response = iris.delegate_to_claude(user_input, file_path)
+                    ui_signals.claude_thinking_changed.emit(False)
+                else:
+                    response = iris.chat(user_input)
+
                 print(f"Iris: {response}")
 
                 print(f"[main.handle_ui_input] type={type(response).__name__} len={len(response) if response else 0}")
@@ -92,6 +100,7 @@ def main():
                     iris.speak(response)
             except Exception as e:
                 print(f"\n[Error UI Input] {e}")
+                ui_signals.claude_thinking_changed.emit(False)
                 ui_signals.text_updated.emit(f"[Error]\n{str(e)}")
 
         threading.Thread(target=worker, daemon=True).start()
@@ -119,9 +128,17 @@ def main():
                     continue
 
                 print("\nIris: ", end="", flush=True)
-                ui_signals.mood_updated.emit(iris.personality.state.mood.value) 
-                
-                response = iris.chat(user_input)
+                ui_signals.mood_updated.emit(iris.personality.state.mood.value)
+
+                from core.claude_delegate import needs_delegation
+                should_delegate, file_path = needs_delegation(user_input)
+                if should_delegate:
+                    print("[delegando a Claude Code...]")
+                    ui_signals.claude_thinking_changed.emit(True)
+                    response = iris.delegate_to_claude(user_input, file_path)
+                    ui_signals.claude_thinking_changed.emit(False)
+                else:
+                    response = iris.chat(user_input)
                 print(response)
 
                 ui_signals.text_updated.emit(response)

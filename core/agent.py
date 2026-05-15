@@ -232,6 +232,97 @@ class IrisAgent:
         if self._voice:
             self._voice.speak(text)
 
+    # ─── Delegación a Claude Code ─────────────────────────────────────────────
+
+    def delegate_to_claude(self, user_input: str, file_path: str | None = None) -> str:
+        """
+        Runs Claude Code for complex analysis, injects the raw output as
+        internal system context, then generates Iris's response through her
+        full personality pipeline.  The original user message is what gets
+        stored in conversation history — not the injected prompt.
+
+        Flow:
+          1. IntentAgent (Groq) — understands real intent, generates optimized prompt
+          2. ClaudeDelegator   — calls Claude Code subprocess with that prompt
+          3. Iris pipeline     — personality-shapes the response before showing it
+        """
+        import uuid
+        from datetime import datetime, timedelta
+        from core.claude_delegate import ClaudeDelegator, IntentAgent
+
+        # 1. Intent agent: semantic understanding + prompt optimization
+        intent = IntentAgent(self.analysis_llm).analyze(user_input, file_path)
+
+        if not intent["should_delegate"]:
+            # Keyword triggered but intent agent determined it's conversational
+            print("[IntentAgent] Delegación cancelada — respondiendo directamente")
+            return self.chat(user_input)
+
+        # 2. Call Claude Code with the optimized prompt
+        delegator  = ClaudeDelegator()
+        raw_claude = delegator.run_sync(intent["claude_prompt"], intent["file_path"])
+
+        print(f"[Claude Code] respuesta recibida ({len(raw_claude)} chars)")
+
+        self.personality.record_interaction()
+        changes = self.personality.analyze_input(user_input)
+        self.personality.apply_analysis(changes)
+
+        system_content  = self.personality.build_system_prompt()
+        memory_context  = self.memory.get_relevant_memories(user_input)
+        if memory_context:
+            system_content += "\n\n" + memory_context
+
+        system_content += (
+            "\n\n[Análisis interno — procesado por Claude Code]\n"
+            f"{raw_claude}\n"
+            "[Fin del análisis interno]\n"
+            "Usa este análisis como base. Responde como Iris, con tu personalidad actual."
+        )
+
+        messages = [SystemMessage(content=system_content)]
+        messages.extend(self.conversation_history[-self.stm_window:])
+        messages.append(HumanMessage(content=user_input))
+
+        response      = self.llm.invoke(messages)
+        response_text = response.content
+
+        user_msg = HumanMessage(content=user_input)
+        ai_msg   = AIMessage(content=response_text)
+        self.conversation_history.append(user_msg)
+        self.conversation_history.append(ai_msg)
+        if len(self.conversation_history) > self.stm_window * 2:
+            self.conversation_history = self.conversation_history[-self.stm_window * 2:]
+
+        self.memory.add_to_session("user", user_input)
+        self.memory.add_to_session("iris", response_text)
+        self.personality.save_state()
+
+        # Save a short summary to vector DB (not the raw output)
+        try:
+            snippet     = user_input[:80].strip()
+            expires_at  = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+            summary     = (
+                f"Delegación a Claude Code: el usuario pidió \'{snippet}\'. "
+                f"Análisis completado y respondido por Iris."
+            )
+            self.storage.vector.add(
+                memory_id = str(uuid.uuid4()),
+                content   = summary,
+                metadata  = {
+                    "category":   "delegation",
+                    "importance": 1,
+                    "source":     "claude_delegation",
+                    "expires_at": expires_at,
+                    "stored_at":  datetime.now().strftime("%Y-%m-%d"),
+                    "owner":      self.memory.owner_name,
+                },
+            )
+        except Exception as e:
+            print(f"[Iris] Error guardando resumen de delegación: {e}")
+
+        return response_text
+
     # ─── Utils ────────────────────────────────────────────────────────────────
 
     def get_status(self) -> dict:

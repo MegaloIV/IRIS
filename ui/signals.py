@@ -8,3 +8,4 @@ class IrisSignals(QObject):
     terminal_output_updated = pyqtSignal(str)
     voice_mode_changed      = pyqtSignal(bool)
     listening_changed       = pyqtSignal(bool)
+    claude_thinking_changed = pyqtSignal(bool)

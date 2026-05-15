@@ -299,3 +299,30 @@ Responde SOLO con JSON válido:
     "relevant": true|false,
     "reason": "explicación de la carga emocional, técnica o social encontrada"
 }}"""
+
+DELEGATION_INTENT_PROMPT = """You are a task router for an AI assistant system. \
+Your job is to analyze what the user actually wants and decide whether it requires \
+deep processing by a specialized external tool (Claude Code), then produce an optimized \
+technical prompt for that tool if needed.
+
+User message: "{user_input}"{file_hint}
+
+Respond ONLY with valid JSON, no extra text:
+{{
+    "should_delegate": <true if the task requires file reading, document analysis, data extraction, \
+code generation, image understanding, or multi-step technical analysis; \
+false for casual conversation, simple factual questions, or anything answerable directly>,
+    "claude_prompt": "<If should_delegate is true: a precise, self-contained English prompt for \
+the external tool. Start with an action verb (Read, Analyze, Extract, Generate, Compare). \
+Mention explicit file paths. Specify the desired output format. Max 3 sentences. \
+Empty string if should_delegate is false.>",
+    "file_path": "<Absolute or relative file path extracted from the message, or null if none>",
+    "task_type": "<document_analysis|code_analysis|data_extraction|report_generation|image_analysis|comparison|conversational|other>"
+}}
+
+Examples of claude_prompt values:
+- "Read /home/user/report.pdf and extract the main conclusions and key figures as a bullet-point summary."
+- "Analyze the Python file /project/main.py and identify any security vulnerabilities or inefficiencies."
+- "Compare the two Excel files /data/q1.xlsx and /data/q2.xlsx and summarize the differences in a table."
+- "Generate a formal technical report based on this requirement: {user_input}"
+"""
