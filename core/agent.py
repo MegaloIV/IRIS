@@ -8,13 +8,15 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, Annotated, Optional, Callable
 import operator
-import re
 
 from config.settings import settings
-from core.personality import PersonalityEngine, Mood
+from core.personality import PersonalityEngine
 from core.memory import MemoryManager
 from core.llm_factory import get_llm, get_analysis_llm
 from storage.factory import StorageFactory
+from core.utils.history import ConversationHistory
+from core.utils.context import build_messages
+from core.utils.streaming import stream_sentences
 
 
 class IrisState(TypedDict):
@@ -31,7 +33,6 @@ class IrisAgent:
         self.storage      = StorageFactory()
         self.llm          = get_llm()
         self.analysis_llm = get_analysis_llm()
-        self.stm_window   = settings.memory.stm_window
 
         self.personality  = PersonalityEngine(state_storage=self.storage.state)
         self.personality.set_analysis_llm(self.analysis_llm)
@@ -41,23 +42,15 @@ class IrisAgent:
             storage      = self.storage,
         )
 
-        self.conversation_history = self._load_stm_from_db()
+        self.history = ConversationHistory(self.memory, settings.memory.stm_window)
+        self.history.load(self.memory.load_recent_history())
+
         self._voice: Optional[object] = None
         self.graph = self._build_graph()
 
         stats = self.memory.get_stats()
         print(f"[Iris] Iniciada — {self.personality.get_status_summary()}")
-        print(f"[Iris] Memoria: {stats['total_memories']} hechos | {stats['total_messages']} mensajes | STM: {len(self.conversation_history)} cargados")
-
-    def _load_stm_from_db(self) -> list:
-        history = []
-        rows    = self.memory.load_recent_history()
-        for row in rows:
-            if row["role"] == "user":
-                history.append(HumanMessage(content=row["content"]))
-            elif row["role"] == "iris":
-                history.append(AIMessage(content=row["content"]))
-        return history
+        print(f"[Iris] Memoria: {stats['total_memories']} hechos | {stats['total_messages']} mensajes | STM: {len(self.history)} cargados")
 
     def _build_graph(self):
         workflow = StateGraph(IrisState)
@@ -98,15 +91,8 @@ class IrisAgent:
         }
 
     def _generate_response_node(self, state: IrisState) -> dict:
-        system_content = state["system_prompt"]
-        if state["memory_context"]:
-            system_content += "\n\n" + state["memory_context"]
-
-        messages = [SystemMessage(content=system_content)]
-        messages.extend(self.conversation_history[-self.stm_window:])
-        messages.append(state["messages"][-1])
-
-        response = self.llm.invoke(messages)
+        msgs     = build_messages(state["system_prompt"], state["memory_context"], self.history.get_window(), state["messages"][-1])
+        response = self.llm.invoke(msgs)
         return {
             "messages":       [response],
             "current_mood":   state["current_mood"],
@@ -118,15 +104,8 @@ class IrisAgent:
     def _update_state_node(self, state: IrisState) -> dict:
         user_msg = state["messages"][-2] if len(state["messages"]) >= 2 else state["messages"][-1]
         ai_msg   = state["messages"][-1]
-
         if hasattr(user_msg, "content") and hasattr(ai_msg, "content"):
-            self.conversation_history.append(user_msg)
-            self.conversation_history.append(ai_msg)
-            if len(self.conversation_history) > self.stm_window * 2:
-                self.conversation_history = self.conversation_history[-self.stm_window * 2:]
-            self.memory.add_to_session("user", user_msg.content)
-            self.memory.add_to_session("iris", ai_msg.content)
-
+            self.history.append_turn(user_msg.content, ai_msg.content)
         self.personality.save_state()
         return state
 
@@ -151,61 +130,20 @@ class IrisAgent:
         Chat con streaming para voz.
         Llama on_sentence() con cada oración completa en cuanto el LLM la genera.
         Retorna el texto completo al final.
-
-        Flujo:
-          LLM genera "Funcional." → on_sentence("Funcional.") → TTS empieza
-          LLM genera " No hay..." → on_sentence("No hay...") → TTS en paralelo
         """
         self.personality.record_interaction()
-
-        # Preparar contexto
         changes = self.personality.analyze_input(user_input)
         self.personality.apply_analysis(changes)
 
         from config.prompts import VOICE_MODE_ADDON
         system_content = self.personality.build_system_prompt() + "\n" + VOICE_MODE_ADDON
         memory_context = self.memory.get_relevant_memories(user_input)
-        if memory_context:
-            system_content += "\n\n" + memory_context
 
-        messages = [SystemMessage(content=system_content)]
-        messages.extend(self.conversation_history[-self.stm_window:])
-        messages.append(HumanMessage(content=user_input))
+        msgs          = build_messages(system_content, memory_context, self.history.get_window(), HumanMessage(content=user_input))
+        full_response = stream_sentences(self.llm, msgs, on_sentence)
 
-        # Streaming del LLM
-        full_response = ""
-        buffer        = ""
-
-        for chunk in self.llm.stream(messages):
-            token = chunk.content if hasattr(chunk, "content") else str(chunk)
-            full_response += token
-            buffer        += token
-
-            # Detectar oración completa
-            sentences = re.split(r'(?<=[.!?])\s+', buffer)
-            if len(sentences) > 1:
-                # Tenemos al menos una oración completa
-                for sentence in sentences[:-1]:
-                    sentence = sentence.strip()
-                    if sentence:
-                        on_sentence(sentence)
-                buffer = sentences[-1]  # resto sin procesar
-
-        # Enviar lo que quede en el buffer
-        if buffer.strip():
-            on_sentence(buffer.strip())
-
-        # Guardar en historial
-        user_msg = HumanMessage(content=user_input)
-        ai_msg   = AIMessage(content=full_response)
-        self.conversation_history.append(user_msg)
-        self.conversation_history.append(ai_msg)
-        if len(self.conversation_history) > self.stm_window * 2:
-            self.conversation_history = self.conversation_history[-self.stm_window * 2:]
-        self.memory.add_to_session("user", user_input)
-        self.memory.add_to_session("iris", full_response)
+        self.history.append_turn(user_input, full_response)
         self.personality.save_state()
-
         return full_response
 
     # ─── Voz ──────────────────────────────────────────────────────────────────
@@ -213,9 +151,9 @@ class IrisAgent:
     def start_voice(self, on_speaking_sentence=None, on_listening_changed=None):
         from voice.listener import VoiceListener
         self._voice = VoiceListener(
-            on_text_input=self.chat_stream_voice,
-            on_speaking_sentence=on_speaking_sentence,
-            on_listening_changed=on_listening_changed,
+            on_text_input        = self.chat_stream_voice,
+            on_speaking_sentence = on_speaking_sentence,
+            on_listening_changed = on_listening_changed,
         )
         self._voice.start()
         print("[Iris] Sistema de voz activo.")
@@ -234,7 +172,7 @@ class IrisAgent:
 
     # ─── Delegación a Claude Code ─────────────────────────────────────────────
 
-    def delegate_to_claude(self, user_input: str, file_path: str | None = None) -> str:
+    def delegate_to_claude(self, user_input: str, file_path: str | None = None, on_delegating: Callable | None = None) -> str:
         """
         Runs Claude Code for complex analysis, injects the raw output as
         internal system context, then generates Iris's response through her
@@ -250,18 +188,16 @@ class IrisAgent:
         from datetime import datetime, timedelta
         from core.claude_delegate import ClaudeDelegator, IntentAgent, _build_prompt
 
-        # 1. Intent agent: semantic understanding + prompt optimization
         intent = IntentAgent(self.analysis_llm).analyze(user_input, file_path)
-
         if not intent["should_delegate"]:
-            # Keyword triggered but intent agent determined it's conversational
             print("[IntentAgent] Delegación cancelada — respondiendo directamente")
             return self.chat(user_input)
 
-        # 2. Call Claude Code with the optimized prompt
+        if on_delegating:
+            on_delegating()
+
         delegator  = ClaudeDelegator()
         raw_claude = delegator.run_sync(_build_prompt(user_input, intent), intent["file_path"])
-
         print(f"[Claude Code] respuesta recibida ({len(raw_claude)} chars)")
 
         self.personality.record_interaction()
@@ -272,7 +208,6 @@ class IrisAgent:
         memory_context  = self.memory.get_relevant_memories(user_input)
         if memory_context:
             system_content += "\n\n" + memory_context
-
         system_content += (
             "\n\n[Análisis interno — procesado por Claude Code]\n"
             f"{raw_claude}\n"
@@ -280,30 +215,17 @@ class IrisAgent:
             "Usa este análisis como base. Responde como Iris, con tu personalidad actual."
         )
 
-        messages = [SystemMessage(content=system_content)]
-        messages.extend(self.conversation_history[-self.stm_window:])
-        messages.append(HumanMessage(content=user_input))
+        msgs          = [SystemMessage(content=system_content), *self.history.get_window(), HumanMessage(content=user_input)]
+        response_text = self.llm.invoke(msgs).content
 
-        response      = self.llm.invoke(messages)
-        response_text = response.content
-
-        user_msg = HumanMessage(content=user_input)
-        ai_msg   = AIMessage(content=response_text)
-        self.conversation_history.append(user_msg)
-        self.conversation_history.append(ai_msg)
-        if len(self.conversation_history) > self.stm_window * 2:
-            self.conversation_history = self.conversation_history[-self.stm_window * 2:]
-
-        self.memory.add_to_session("user", user_input)
-        self.memory.add_to_session("iris", response_text)
+        self.history.append_turn(user_input, response_text)
         self.personality.save_state()
 
-        # Save a short summary to vector DB (not the raw output)
         try:
-            snippet     = user_input[:80].strip()
-            expires_at  = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
-            summary     = (
-                f"Delegación a Claude Code: el usuario pidió \'{snippet}\'. "
+            snippet    = user_input[:80].strip()
+            expires_at = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+            summary    = (
+                f"Delegación a Claude Code: el usuario pidió '{snippet}'. "
                 f"Análisis completado y respondido por Iris."
             )
             self.storage.vector.add(
@@ -336,7 +258,7 @@ class IrisAgent:
             "total_memories":   stats["total_memories"],
             "total_messages":   stats["total_messages"],
             "session_messages": stats["session_messages"],
-            "stm_loaded":       len(self.conversation_history),
+            "stm_loaded":       len(self.history),
             "voice_active":     self._voice is not None,
         }
 
@@ -347,5 +269,5 @@ class IrisAgent:
         self.storage.close()
 
     def reset_conversation(self):
-        self.conversation_history = []
+        self.history.reset()
         print("[Iris] Conversación reiniciada (memoria y trust intactos)")

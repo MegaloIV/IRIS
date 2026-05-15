@@ -78,19 +78,13 @@ def main():
 
         def worker():
             try:
-                from core.claude_delegate import needs_delegation
                 ui_signals.mood_updated.emit(iris.personality.state.mood.value)
 
-                if attached_file:
-                    should_delegate, file_path = True, attached_file
-                else:
-                    should_delegate, file_path = needs_delegation(user_input)
-                if should_delegate:
-                    ui_signals.claude_thinking_changed.emit(True)
-                    response = iris.delegate_to_claude(user_input, file_path)
-                    ui_signals.claude_thinking_changed.emit(False)
-                else:
-                    response = iris.chat(user_input)
+                response = iris.delegate_to_claude(
+                    user_input,
+                    attached_file or None,
+                    on_delegating=lambda: ui_signals.claude_thinking_changed.emit(True),
+                )
 
                 print(f"Iris: {response}")
 
@@ -103,8 +97,9 @@ def main():
                     iris.speak(response)
             except Exception as e:
                 print(f"\n[Error UI Input] {e}")
-                ui_signals.claude_thinking_changed.emit(False)
                 ui_signals.text_updated.emit(f"[Error]\n{str(e)}")
+            finally:
+                ui_signals.claude_thinking_changed.emit(False)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -133,15 +128,12 @@ def main():
                 print("\nIris: ", end="", flush=True)
                 ui_signals.mood_updated.emit(iris.personality.state.mood.value)
 
-                from core.claude_delegate import needs_delegation
-                should_delegate, file_path = needs_delegation(user_input)
-                if should_delegate:
+                def _on_delegating():
                     print("[delegando a Claude Code...]")
                     ui_signals.claude_thinking_changed.emit(True)
-                    response = iris.delegate_to_claude(user_input, file_path)
-                    ui_signals.claude_thinking_changed.emit(False)
-                else:
-                    response = iris.chat(user_input)
+
+                response = iris.delegate_to_claude(user_input, on_delegating=_on_delegating)
+                ui_signals.claude_thinking_changed.emit(False)
                 print(response)
 
                 ui_signals.text_updated.emit(response)
