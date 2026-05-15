@@ -16,11 +16,14 @@ from voice.toggle import VoiceToggle
 class VoiceListener:
 
     # Añadimos on_speaking_sentence al constructor
-    def __init__(self, on_text_input: Callable, on_speaking_sentence: Callable = None):
-        self.on_text_input = on_text_input
+    def __init__(self, on_text_input: Callable, on_speaking_sentence: Callable = None,
+                 on_listening_changed: Callable = None):
+        self.on_text_input        = on_text_input
         self.on_speaking_sentence = on_speaking_sentence
+        self.on_listening_changed = on_listening_changed
         self.stt           = STTEngine()
         self.tts           = TTSEngine()
+        self.tts_enabled   = True
         self._loop_lock    = threading.Lock()
 
         self.toggle = VoiceToggle(
@@ -40,10 +43,14 @@ class VoiceListener:
         if self._loop_lock.locked():
             logging.warning("[Voice] Loop ya activo — ignorando activacion extra.")
             return
+        if self.on_listening_changed:
+            self.on_listening_changed(True)
         threading.Thread(target=self._listen_loop, daemon=True).start()
 
     def _on_toggle_off(self):
         logging.info("[Voice] Toggle OFF — el loop terminara al detectar silencio.")
+        if self.on_listening_changed:
+            self.on_listening_changed(False)
 
     def _listen_loop(self):
         with self._loop_lock:
@@ -94,13 +101,15 @@ class VoiceListener:
                 # Mostrar texto EXACTAMENTE antes de reproducirlo
                 if self.on_speaking_sentence:
                     self.on_speaking_sentence(item)
-                    
-                self.tts.speak(item) # Esto bloquea hasta que termina la frase
+
+                if self.tts_enabled:
+                    self.tts.speak(item)  # Bloquea hasta que termina la frase
             except Exception as e:
                 logging.error(f"[Voice] Error TTS: {e}")
 
     def speak(self, text: str):
-        threading.Thread(target=self.tts.speak, args=(text,), daemon=True).start()
+        if self.tts_enabled:
+            threading.Thread(target=self.tts.speak, args=(text,), daemon=True).start()
 
     def synthesize_for_telegram(self, text: str) -> str:
         return self.tts.synthesize_for_telegram(text)

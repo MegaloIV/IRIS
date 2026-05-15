@@ -30,3 +30,7 @@ data/chromadb/
 Thumbs.db
 
 keys.txt
+
+CLAUDE.md
+
+.claude/

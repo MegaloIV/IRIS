@@ -1,71 +1,49 @@
 """
 ui/avatar.py
-Interfaz flotante de Iris con terminal independiente a la izquierda.
+Ventana principal del avatar flotante de Iris.
 """
 
 import os
-from PyQt6.QtWidgets import (QWidget, QLabel, QHBoxLayout, QVBoxLayout, QApplication, 
-                             QGraphicsOpacityEffect, QLineEdit, QPushButton)
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QPropertyAnimation, QEasingCurve, QTimer
-from PyQt6.QtGui import QPixmap, QFont
+import logging
+from pathlib import Path
 
-class IrisSignals(QObject):
-    text_updated = pyqtSignal(str)
-    mood_updated = pyqtSignal(str)
-    user_text_submitted = pyqtSignal(str)
-    terminal_output_updated = pyqtSignal(str)
+from PyQt6.QtWidgets import (QWidget, QLabel, QHBoxLayout, QVBoxLayout,
+                             QApplication, QLineEdit, QPushButton,
+                             QGraphicsOpacityEffect)
+from PyQt6.QtCore import Qt, QPoint, QPropertyAnimation, QEasingCurve
+from PyQt6.QtGui import QPixmap
 
-class TerminalOutputUI(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        
-        layout = QVBoxLayout()
-        self.label = QLabel("")
-        self.label.setFont(QFont("Consolas", 10))
-        self.label.setWordWrap(True)
-        self.label.setFixedWidth(300)
-        self.label.setStyleSheet("""
-            QLabel {
-                background-color: rgba(0, 0, 0, 230);
-                color: #00FF00;
-                border: 2px solid #333;
-                border-radius: 10px;
-                padding: 15px;
-            }
-        """)
-        layout.addWidget(self.label)
-        self.setLayout(layout)
-        self.setVisible(False)
-        
-        screen = QApplication.primaryScreen().geometry()
-        self.setGeometry(50, screen.height() - 400, 320, 300)
+from .signals import IrisSignals
+from .bubble import BubbleRenderer
+from .settings_panel import SettingsPanel
 
-    def show_message(self, text):
-        self.label.setText(text)
-        self.setVisible(True)
-        QTimer.singleShot(7000, lambda: self.setVisible(False))
+logger = logging.getLogger(__name__)
+
 
 class IrisAvatarUI(QWidget):
     def __init__(self, signals: IrisSignals):
         super().__init__()
-        self.signals = signals
+        self.signals     = signals
         self.avatar_path = "assets/avatars/"
-        
-        self.hide_timer = QTimer(self)
-        self.hide_timer.setSingleShot(True)
-        self.hide_timer.timeout.connect(self.hide_subtitles)
+        self._pending_file: str | None = None
 
-        self.init_ui()
-        
+        self.settings_panel = SettingsPanel()
+        self._init_ui()
+
         self.signals.text_updated.connect(self.update_subtitles)
         self.signals.mood_updated.connect(self.update_avatar)
+        self.signals.listening_changed.connect(self._on_listening_changed)
+        self.signals.claude_thinking_changed.connect(self._on_claude_thinking_changed)
 
-    def init_ui(self):
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
+    def _init_ui(self):
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet("background: transparent; border: none;")
+        self.setAcceptDrops(True)
 
         main_layout = QVBoxLayout()
         main_layout.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
@@ -73,50 +51,96 @@ class IrisAvatarUI(QWidget):
 
         upper_row = QHBoxLayout()
         upper_row.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
+        upper_row.setContentsMargins(0, 0, 0, 0)
+        upper_row.setSpacing(0)
 
-        self.text_label = QLabel("...")
-        self.text_label.setFont(QFont("Comic Sans MS", 10, QFont.Weight.Bold))
-        # Ajustes de CSS: más padding para que el texto respire
-        self.text_label.setStyleSheet("""
-            QLabel {
-                background-color: #FFFFFF;
-                color: #000000;
-                border-radius: 15px;
-                padding: 15px; 
-                border: 2px solid #000000;
-                margin-right: 15px;
-                margin-bottom: 20px;
-            }
-        """)
-        self.text_label.setWordWrap(True)
-        # Límites más naturales para evitar el efecto "columna estrecha"
-        self.text_label.setMinimumWidth(150)
-        self.text_label.setMaximumWidth(280)
-        # Alineado a la izquierda como un chat normal
-        self.text_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.text_label.setVisible(False)
-        
-        self.opacity_effect = QGraphicsOpacityEffect(self.text_label)
-        self.text_label.setGraphicsEffect(self.opacity_effect)
-        self.opacity_effect.setOpacity(0.0)
-        
-        self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
-        self.fade_animation.setDuration(400)
-        self.fade_animation.setEasingCurve(QEasingCurve.Type.InOutQuad)
-        self.fade_animation.finished.connect(self._on_fade_finished)
+        # Bubble: fixed 255 px, never shifts the avatar
+        self.bubble_renderer = BubbleRenderer()
 
+        # Avatar: fixed 143 px, always anchored to the right
         self.avatar_label = QLabel()
         self.avatar_label.setFixedSize(143, 150)
-        self.update_avatar("neutral") 
+        self.update_avatar("neutral")
 
-        upper_row.addWidget(self.text_label)
-        upper_row.addWidget(self.avatar_label)
+        self.settings_btn = QPushButton("⚙")
+        self.settings_btn.setFixedSize(28, 22)
+        self.settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.settings_btn.setToolTip("Configuración")
+        self.settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(40, 40, 40, 200);
+                color: #AAAAAA;
+                border: 1px solid #555;
+                border-radius: 6px;
+                font-size: 13px;
+                padding: 0px;
+            }
+            QPushButton:hover   { background-color: rgba(65, 65, 65, 220); color: #EEE; }
+            QPushButton:pressed { background-color: rgba(80, 80, 80, 220); }
+        """)
+        self.settings_btn.clicked.connect(self._toggle_settings)
+
+        self.listening_dot = QWidget()
+        self.listening_dot.setFixedSize(10, 10)
+        self.listening_dot.setToolTip("No escuchando")
+        self.listening_dot.setStyleSheet(
+            "background-color: #FF4444; border-radius: 5px; border: none;"
+        )
+
+        self._dot_opacity = QGraphicsOpacityEffect(self.listening_dot)
+        self.listening_dot.setGraphicsEffect(self._dot_opacity)
+        self._dot_opacity.setOpacity(1.0)
+
+        self._dot_anim = QPropertyAnimation(self._dot_opacity, b"opacity")
+        self._dot_anim.setDuration(1000)
+        self._dot_anim.setKeyValueAt(0.0, 1.0)
+        self._dot_anim.setKeyValueAt(0.5, 0.25)
+        self._dot_anim.setKeyValueAt(1.0, 1.0)
+        self._dot_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+        self._dot_anim.setLoopCount(-1)
+
+        gear_row = QHBoxLayout()
+        gear_row.setContentsMargins(0, 0, 0, 2)
+        gear_row.addStretch()
+        gear_row.addWidget(self.listening_dot)
+        gear_row.addSpacing(5)
+        gear_row.addWidget(self.settings_btn)
+
+        avatar_container = QWidget()
+        avatar_container.setFixedWidth(143)
+        avatar_container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        avatar_inner = QVBoxLayout(avatar_container)
+        avatar_inner.setContentsMargins(0, 0, 0, 0)
+        avatar_inner.setSpacing(0)
+        avatar_inner.addLayout(gear_row)
+        avatar_inner.addWidget(self.avatar_label)
+
+        self.settings_panel.btn_voice.clicked.connect(lambda: self._on_mode_set(True))
+        self.settings_panel.btn_text_mode.clicked.connect(lambda: self._on_mode_set(False))
+
+        # Claude Code thinking indicator (hidden by default)
+        self.claude_indicator = QLabel("\u26a1 Consultando Claude...")
+        self.claude_indicator.setStyleSheet("""
+            QLabel {
+                background-color: rgba(204, 102, 0, 210);
+                color: white;
+                border-radius: 7px;
+                padding: 2px 7px;
+                font-size: 9px;
+                font-weight: bold;
+            }
+        """)
+        self.claude_indicator.setVisible(False)
+        avatar_inner.insertWidget(0, self.claude_indicator)
+
+        upper_row.addWidget(self.bubble_renderer)
+        upper_row.addWidget(avatar_container)
 
         terminal_layout = QHBoxLayout()
         terminal_layout.setAlignment(Qt.AlignmentFlag.AlignRight)
-        
+
         self.terminal_input = QLineEdit()
-        self.terminal_input.setFixedWidth(180) 
+        self.terminal_input.setFixedWidth(180)
         self.terminal_input.setPlaceholderText("Comando o texto...")
         self.terminal_input.setStyleSheet("""
             QLineEdit {
@@ -152,46 +176,134 @@ class IrisAvatarUI(QWidget):
         terminal_layout.addWidget(self.terminal_input)
         terminal_layout.addWidget(self.terminal_btn)
 
+        self._file_chip = QPushButton("")
+        self._file_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._file_chip.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(80, 130, 200, 200);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 2px 8px;
+                font-size: 9px;
+                max-height: 20px;
+            }
+            QPushButton:hover { background-color: rgba(180, 60, 60, 200); }
+        """)
+        self._file_chip.setVisible(False)
+        self._file_chip.setToolTip("Click para quitar el archivo adjunto")
+        self._file_chip.clicked.connect(self._clear_attachment)
+
+        file_chip_layout = QHBoxLayout()
+        file_chip_layout.setAlignment(Qt.AlignmentFlag.AlignRight)
+        file_chip_layout.setContentsMargins(0, 0, 0, 0)
+        file_chip_layout.addWidget(self._file_chip)
+
         main_layout.addLayout(upper_row)
+        main_layout.addLayout(file_chip_layout)
         main_layout.addLayout(terminal_layout)
         self.setLayout(main_layout)
 
         screen = QApplication.primaryScreen().geometry()
-        self.setGeometry(screen.width() - 440, screen.height() - 430, 420, 400) 
+        self.setGeometry(screen.width() - 440, screen.height() - 430, 420, 400)
+
+    # ── Settings ──────────────────────────────────────────────────────────────
+
+    def _toggle_settings(self):
+        if self.settings_panel.isVisible():
+            self.settings_panel.hide()
+            return
+        self.settings_panel.adjustSize()
+        btn_global = self.settings_btn.mapToGlobal(QPoint(0, 0))
+        panel_w    = self.settings_panel.width()
+        panel_h    = self.settings_panel.height()
+        x = btn_global.x() + self.settings_btn.width() - panel_w
+        y = btn_global.y() - panel_h - 4
+        if y < 0:
+            y = btn_global.y() + self.settings_btn.height() + 4
+        self.settings_panel.move(x, y)
+        self.settings_panel.show()
+        self.settings_panel.raise_()
+
+    def _on_mode_set(self, voice: bool):
+        self.settings_panel.set_mode(voice)
+        self.signals.voice_mode_changed.emit(voice)
+        self.settings_panel.hide()
+
+    # ── Terminal ──────────────────────────────────────────────────────────────
 
     def _toggle_terminal(self):
         self.terminal_input.setVisible(not self.terminal_input.isVisible())
-        if self.terminal_input.isVisible(): self.terminal_input.setFocus()
+        if self.terminal_input.isVisible():
+            self.terminal_input.setFocus()
 
     def _on_terminal_submit(self):
         text = self.terminal_input.text().strip()
         if text:
-            self.signals.user_text_submitted.emit(text)
+            self.signals.user_text_submitted.emit(text, self._pending_file or "")
+            self._pending_file = None
+            self._file_chip.setVisible(False)
             self.terminal_input.clear()
         self.terminal_input.setVisible(False)
 
+    # ── Drag & drop ───────────────────────────────────────────────────────────
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if not urls:
+            return
+        path = urls[0].toLocalFile()
+        if not path:
+            return
+        self._pending_file = path
+        self._file_chip.setText(f"  {Path(path).name}  x")
+        self._file_chip.setVisible(True)
+        if not self.terminal_input.isVisible():
+            self.terminal_input.setVisible(True)
+            self.terminal_input.setFocus()
+
+    def _clear_attachment(self):
+        self._pending_file = None
+        self._file_chip.setVisible(False)
+
+    # ── Avatar & subtitles ────────────────────────────────────────────────────
+
     def update_avatar(self, mood: str):
         img_path = os.path.join(self.avatar_path, f"{mood}.png")
-        if not os.path.exists(img_path): img_path = os.path.join(self.avatar_path, "neutral.png")
+        if not os.path.exists(img_path):
+            img_path = os.path.join(self.avatar_path, "neutral.png")
         if os.path.exists(img_path):
-            pixmap = QPixmap(img_path).scaled(self.avatar_label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            pixmap = QPixmap(img_path).scaled(
+                self.avatar_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
             self.avatar_label.setPixmap(pixmap)
 
-    def update_subtitles(self, text: str):
-        self.fade_animation.stop()
-        if not text or text == "...":
-            self.hide_subtitles()
+    def _on_listening_changed(self, listening: bool):
+        if listening:
+            self.listening_dot.setStyleSheet(
+                "background-color: #44DD44; border-radius: 5px; border: none;"
+            )
+            self.listening_dot.setToolTip("Escuchando")
+            self._dot_anim.start()
         else:
-            self.opacity_effect.setOpacity(1.0)
-            self.text_label.setText(text)
-            self.text_label.setVisible(True)
-            self.hide_timer.start(6000)
+            self._dot_anim.stop()
+            self._dot_opacity.setOpacity(1.0)
+            self.listening_dot.setStyleSheet(
+                "background-color: #FF4444; border-radius: 5px; border: none;"
+            )
+            self.listening_dot.setToolTip("No escuchando")
 
-    def hide_subtitles(self):
-        if self.opacity_effect.opacity() > 0:
-            self.fade_animation.setStartValue(self.opacity_effect.opacity())
-            self.fade_animation.setEndValue(0.0)
-            self.fade_animation.start()
+    def _on_claude_thinking_changed(self, thinking: bool):
+        self.claude_indicator.setVisible(thinking)
 
-    def _on_fade_finished(self):
-        if self.opacity_effect.opacity() == 0.0: self.text_label.setVisible(False)
+    def update_subtitles(self, text: str):
+        logger.debug("update_subtitles: type=%s len=%d repr=%r",
+                     type(text).__name__, len(text) if text else 0,
+                     (text or "")[:80])
+        self.bubble_renderer.show_text(text)

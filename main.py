@@ -12,7 +12,9 @@ from PyQt6.QtWidgets import QApplication
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
-from ui.avatar import IrisAvatarUI, IrisSignals, TerminalOutputUI
+from ui.avatar import IrisAvatarUI
+from ui.signals import IrisSignals
+from ui.terminal_overlay import TerminalOutputUI
 
 def main():
     print("=" * 50)
@@ -53,7 +55,10 @@ def main():
 
     print("[Voice] Iniciando sistema de voz...")
     try:
-        iris.start_voice(on_speaking_sentence=ui_signals.text_updated.emit)
+        iris.start_voice(
+            on_speaking_sentence=ui_signals.text_updated.emit,
+            on_listening_changed=ui_signals.listening_changed.emit,
+        )
         print("[Voice] Listo — presiona el botón Copilot para hablar con Iris.")
     except Exception as e:
         print(f"[Voice] Error: {e}")
@@ -63,9 +68,9 @@ def main():
     print(f"\n[Sistema listo] — {iris.personality.get_status_summary()}")
     print("-" * 50)
 
-    def handle_ui_input(user_input):
+    def handle_ui_input(user_input, attached_file=""):
         print(f"\nTú (UI): {user_input}")
-        
+
         if user_input.startswith("/"):
             cmd_output = _handle_command(user_input, iris)
             ui_signals.terminal_output_updated.emit(cmd_output)
@@ -73,22 +78,47 @@ def main():
 
         def worker():
             try:
-                ui_signals.mood_updated.emit(iris.personality.state.mood.value) 
-                
-                response = iris.chat(user_input)
+                from core.claude_delegate import needs_delegation
+                ui_signals.mood_updated.emit(iris.personality.state.mood.value)
+
+                if attached_file:
+                    should_delegate, file_path = True, attached_file
+                else:
+                    should_delegate, file_path = needs_delegation(user_input)
+                if should_delegate:
+                    ui_signals.claude_thinking_changed.emit(True)
+                    response = iris.delegate_to_claude(user_input, file_path)
+                    ui_signals.claude_thinking_changed.emit(False)
+                else:
+                    response = iris.chat(user_input)
+
                 print(f"Iris: {response}")
-                
-                # Emitimos la respuesta al globo blanco. 
-                # La UI se encarga de mostrarla y ocultarla automáticamente.
+
+                print(f"[main.handle_ui_input] type={type(response).__name__} len={len(response) if response else 0}")
+                print(f"[main.handle_ui_input] repr (primeros 200): {repr(response[:200]) if response else repr(response)}")
+                print(f"[main.handle_ui_input] emitting text_updated …")
                 ui_signals.text_updated.emit(response)
                 ui_signals.mood_updated.emit(iris.personality.state.mood.value)
+                if tts_enabled[0]:
+                    iris.speak(response)
             except Exception as e:
                 print(f"\n[Error UI Input] {e}")
+                ui_signals.claude_thinking_changed.emit(False)
                 ui_signals.text_updated.emit(f"[Error]\n{str(e)}")
 
         threading.Thread(target=worker, daemon=True).start()
 
     ui_signals.user_text_submitted.connect(handle_ui_input)
+
+    tts_enabled = [True]
+
+    def on_voice_mode_changed(enabled: bool):
+        tts_enabled[0] = enabled
+        iris.set_tts_enabled(enabled)
+        mode_label = "Voz" if enabled else "Solo texto"
+        print(f"[Iris] Modo cambiado: {mode_label}")
+
+    ui_signals.voice_mode_changed.connect(on_voice_mode_changed)
 
     def terminal_loop():
         while True:
@@ -101,9 +131,17 @@ def main():
                     continue
 
                 print("\nIris: ", end="", flush=True)
-                ui_signals.mood_updated.emit(iris.personality.state.mood.value) 
-                
-                response = iris.chat(user_input)
+                ui_signals.mood_updated.emit(iris.personality.state.mood.value)
+
+                from core.claude_delegate import needs_delegation
+                should_delegate, file_path = needs_delegation(user_input)
+                if should_delegate:
+                    print("[delegando a Claude Code...]")
+                    ui_signals.claude_thinking_changed.emit(True)
+                    response = iris.delegate_to_claude(user_input, file_path)
+                    ui_signals.claude_thinking_changed.emit(False)
+                else:
+                    response = iris.chat(user_input)
                 print(response)
 
                 ui_signals.text_updated.emit(response)
