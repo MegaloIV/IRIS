@@ -60,10 +60,20 @@ class IntentAgent:
             result = json.loads(raw)
 
             should = bool(result.get("should_delegate", True))
-            if result.get("task_type") == "conversational":
-                should = False
             claude_prompt = (result.get("claude_prompt") or "").strip() or user_input
             file_path = result.get("file_path") or detected_file_path
+
+            if file_path:
+                should = True
+                if result.get("task_type") == "conversational" and Path(file_path).suffix.lower() in _IMAGE_EXTENSIONS:
+                    claude_prompt = (
+                        f"The user showed you this image and said: '{user_input}'. "
+                        f"Describe what you see in the image in first person, "
+                        f"as if you are seeing it yourself. "
+                        f"Respond naturally, not as a developer analyzing code."
+                    )
+            elif result.get("task_type") == "conversational":
+                should = False
 
             print(
                 f"[IntentAgent] should_delegate={should} "

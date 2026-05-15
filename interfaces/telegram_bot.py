@@ -9,6 +9,7 @@ Only responds to TELEGRAM_OWNER_ID; all other senders are silently ignored.
 import asyncio
 import logging
 import os
+import re
 
 from fastapi import FastAPI, Request, Response
 from telegram import Bot, Update
@@ -20,24 +21,28 @@ from config.prompts import TELEGRAM_INTERFACE_ADDON
 logger = logging.getLogger(__name__)
 
 _MAX_LEN = 4096
-_TYPING_INTERVAL = 4  # seconds — Telegram's indicator expires after 5s
+_TYPING_INTERVAL = 4       # seconds — Telegram's indicator expires after 5s
+_MSG_DELAY = 0.8           # seconds between split messages
+_SENTENCE_SPLIT = re.compile(r'(?<=[.!?…])\s+')
 
 
-def _split_text(text: str) -> list[str]:
-    """Split at the last newline before 4096 chars; falls back to hard split."""
-    if len(text) <= _MAX_LEN:
-        return [text]
-    chunks: list[str] = []
-    while text:
-        if len(text) <= _MAX_LEN:
-            chunks.append(text)
-            break
-        split_at = text.rfind("\n", 0, _MAX_LEN)
-        if split_at <= 0:
-            split_at = _MAX_LEN
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip("\n")
-    return chunks
+def _split_into_messages(text: str) -> list[str]:
+    """Split into short chat-style messages: max 2 sentences per message.
+    Paragraph breaks always produce a new message. Hard-caps at 4096 chars."""
+    paragraphs = [p.strip() for p in re.split(r'\n\n+', text) if p.strip()]
+    messages: list[str] = []
+    for para in paragraphs:
+        sentences = [s.strip() for s in _SENTENCE_SPLIT.split(para) if s.strip()]
+        if not sentences:
+            continue
+        for i in range(0, len(sentences), 2):
+            chunk = " ".join(sentences[i:i + 2])
+            while len(chunk) > _MAX_LEN:
+                messages.append(chunk[:_MAX_LEN])
+                chunk = chunk[_MAX_LEN:]
+            if chunk:
+                messages.append(chunk)
+    return messages or [text]
 
 
 def create_telegram_app(iris) -> FastAPI:
@@ -134,9 +139,12 @@ def create_telegram_app(iris) -> FastAPI:
             except Exception as e:
                 logger.warning(f"[Telegram] TTS falló, enviando texto: {e}")
 
-        # Text fallback — split if over 4096 chars
-        for chunk in _split_text(response_text):
-            await bot.send_message(chat_id=chat_id, text=chunk)
+        # Split into short chat-style messages and send with a small delay
+        parts = _split_into_messages(response_text)
+        for i, part in enumerate(parts):
+            await bot.send_message(chat_id=chat_id, text=part)
+            if i < len(parts) - 1:
+                await asyncio.sleep(_MSG_DELAY)
 
         return Response(status_code=200)
 

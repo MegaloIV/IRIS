@@ -96,7 +96,7 @@ class IrisAgent:
     def _generate_response_node(self, state: IrisState) -> dict:
         system_prompt = state["system_prompt"]
         if state["interface_context"]:
-            system_prompt += "\n\n" + state["interface_context"]
+            system_prompt = state["interface_context"] + "\n\n" + system_prompt
         msgs     = build_messages(system_prompt, state["memory_context"], self.history.get_window(), state["messages"][-1])
         response = self.llm.invoke(msgs)
         return {
@@ -194,7 +194,8 @@ class IrisAgent:
         """
         import uuid
         from datetime import datetime, timedelta
-        from core.claude_delegate import ClaudeDelegator, IntentAgent, _build_prompt
+        from pathlib import Path
+        from core.claude_delegate import ClaudeDelegator, IntentAgent, _build_prompt, _IMAGE_EXTENSIONS
 
         intent = IntentAgent(self.analysis_llm).analyze(user_input, file_path)
         if not intent["should_delegate"]:
@@ -212,16 +213,26 @@ class IrisAgent:
         changes = self.personality.analyze_input(user_input)
         self.personality.apply_analysis(changes)
 
-        system_content  = self.personality.build_system_prompt()
+        is_image = bool(intent["file_path"] and Path(intent["file_path"]).suffix.lower() in _IMAGE_EXTENSIONS)
+
+        effective_context = interface_context
+        if is_image:
+            vision_note = (
+                "You have been given a visual description of an image through "
+                "an external vision system. React to it as if you can see it — "
+                "do not say you cannot see images."
+            )
+            effective_context = (effective_context + "\n\n" + vision_note) if effective_context else vision_note
+
+        base_prompt     = self.personality.build_system_prompt()
         memory_context  = self.memory.get_relevant_memories(user_input)
+        system_content  = (effective_context + "\n\n" + base_prompt) if effective_context else base_prompt
         if memory_context:
             system_content += "\n\n" + memory_context
-        if interface_context:
-            system_content += "\n\n" + interface_context
+
+        visual_label = "[Visual input via Claude]" if is_image else "[Análisis interno — procesado por Claude Code]"
         system_content += (
-            "\n\n[Análisis interno — procesado por Claude Code]\n"
-            f"{raw_claude}\n"
-            "[Fin del análisis interno]\n"
+            f"\n\n{visual_label}: {raw_claude}\n"
             "Usa este análisis como base. Responde como Iris, con tu personalidad actual."
         )
 
