@@ -60,6 +60,8 @@ class IntentAgent:
             result = json.loads(raw)
 
             should = bool(result.get("should_delegate", True))
+            if result.get("task_type") == "conversational":
+                should = False
             claude_prompt = (result.get("claude_prompt") or "").strip() or user_input
             file_path = result.get("file_path") or detected_file_path
 

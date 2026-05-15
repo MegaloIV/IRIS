@@ -15,6 +15,26 @@ warnings.filterwarnings("ignore", category=UserWarning)
 from ui.avatar import IrisAvatarUI
 from ui.signals import IrisSignals
 from ui.terminal_overlay import TerminalOutputUI
+from config.settings import settings
+
+
+def _run_telegram_server(iris) -> None:
+    """Run the FastAPI webhook server in a dedicated thread with its own event loop."""
+    import asyncio
+    import uvicorn
+    from interfaces.telegram_bot import create_telegram_app
+
+    app  = create_telegram_app(iris)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    config = uvicorn.Config(
+        app,
+        host=settings.server.host,
+        port=settings.server.port,
+        loop="none",
+        log_level="warning",
+    )
+    loop.run_until_complete(uvicorn.Server(config).serve())
 
 def main():
     print("=" * 50)
@@ -34,7 +54,7 @@ def main():
     iris = IrisAgent()
 
     original_chat_stream = iris.chat_stream_voice
-    
+
     def hooked_chat_stream(user_input, on_sentence):
         changes = iris.personality.analyze_input(user_input)
         if changes.get("mood"):
@@ -43,9 +63,26 @@ def main():
 
     iris.chat_stream_voice = hooked_chat_stream
 
+    # ── Telegram (optional) ──────────────────────────────────────────────────
+    _cf_proc = None
+    if settings.telegram.enabled and settings.telegram.bot_token:
+        try:
+            from scripts.start_telegram import start_cloudflared, set_webhook
+            _cf_proc, public_url = start_cloudflared(settings.server.port)
+            print(f"[cloudflared] URL pública: {public_url}")
+            set_webhook(settings.telegram.bot_token, public_url)
+            threading.Thread(target=_run_telegram_server, args=(iris,), daemon=True).start()
+            print("[Telegram] Bot activo — envía un mensaje al bot para empezar.")
+        except Exception as e:
+            print(f"[Telegram] Error al iniciar: {e}")
+            print("[Telegram] Continuando sin Telegram.")
+    # ─────────────────────────────────────────────────────────────────────────
+
     def shutdown(sig=None, frame=None):
         print("\n\n[Iris] Guardando memorias antes de cerrar...")
         iris.shutdown()
+        if _cf_proc:
+            _cf_proc.kill()
         print("[Iris] Hasta luego.")
         QApplication.quit()
         sys.exit(0)
@@ -78,19 +115,13 @@ def main():
 
         def worker():
             try:
-                from core.claude_delegate import needs_delegation
                 ui_signals.mood_updated.emit(iris.personality.state.mood.value)
 
-                if attached_file:
-                    should_delegate, file_path = True, attached_file
-                else:
-                    should_delegate, file_path = needs_delegation(user_input)
-                if should_delegate:
-                    ui_signals.claude_thinking_changed.emit(True)
-                    response = iris.delegate_to_claude(user_input, file_path)
-                    ui_signals.claude_thinking_changed.emit(False)
-                else:
-                    response = iris.chat(user_input)
+                response = iris.delegate_to_claude(
+                    user_input,
+                    attached_file or None,
+                    on_delegating=lambda: ui_signals.claude_thinking_changed.emit(True),
+                )
 
                 print(f"Iris: {response}")
 
@@ -103,8 +134,9 @@ def main():
                     iris.speak(response)
             except Exception as e:
                 print(f"\n[Error UI Input] {e}")
-                ui_signals.claude_thinking_changed.emit(False)
                 ui_signals.text_updated.emit(f"[Error]\n{str(e)}")
+            finally:
+                ui_signals.claude_thinking_changed.emit(False)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -133,15 +165,12 @@ def main():
                 print("\nIris: ", end="", flush=True)
                 ui_signals.mood_updated.emit(iris.personality.state.mood.value)
 
-                from core.claude_delegate import needs_delegation
-                should_delegate, file_path = needs_delegation(user_input)
-                if should_delegate:
+                def _on_delegating():
                     print("[delegando a Claude Code...]")
                     ui_signals.claude_thinking_changed.emit(True)
-                    response = iris.delegate_to_claude(user_input, file_path)
-                    ui_signals.claude_thinking_changed.emit(False)
-                else:
-                    response = iris.chat(user_input)
+
+                response = iris.delegate_to_claude(user_input, on_delegating=_on_delegating)
+                ui_signals.claude_thinking_changed.emit(False)
                 print(response)
 
                 ui_signals.text_updated.emit(response)

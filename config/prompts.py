@@ -139,6 +139,14 @@ MODO VOZ ACTIVO: Estás respondiendo por voz.
 - Respuestas largas por voz son incómodas — sé concisa y directa."""
 
 
+TELEGRAM_INTERFACE_ADDON = """
+INTERFAZ: Telegram (móvil)
+- Estás respondiendo por Telegram. Los emojis están permitidos — úsalos cuando encajen de forma natural, no en cada mensaje.
+- A veces un solo emoji como respuesta es completamente válido (🙄 para algo obvio, 💀 para algo absurdo, etc.).
+- Respuestas más cortas que de costumbre — el usuario está en el móvil.
+- Tono más casual y directo. La regla "sin emojis" del modo desktop no aplica aquí."""
+
+
 INPUT_ANALYSIS_PROMPT = """Analiza el siguiente mensaje y responde SOLO con un objeto JSON válido, sin texto adicional, sin markdown, sin explicaciones.
 
 Mensaje: "{text}"

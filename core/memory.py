@@ -57,7 +57,7 @@ def _sanitize_relation(relation: str) -> str:
 
 class MemoryManager:
 
-    EXTRACT_EVERY = 30  # mensajes entre extracciones
+    EXTRACT_EVERY = 20  # mensajes entre extracciones
 
     def __init__(self, analysis_llm, storage):
         self.analysis_llm = analysis_llm

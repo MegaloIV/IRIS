@@ -75,10 +75,15 @@ class ServerConfig(BaseModel):
     port: int = int(os.getenv("SERVER_PORT", "8000"))
 
 
+_raw_owner_id = os.getenv("TELEGRAM_OWNER_ID", "")
+
+
 class TelegramConfig(BaseModel):
     enabled: bool = os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"
-    token: Optional[str] = os.getenv("TELEGRAM_TOKEN")
-    allowed_user_id: Optional[str] = os.getenv("TELEGRAM_USER_ID")
+    bot_token: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
+    owner_id: Optional[int] = int(_raw_owner_id) if _raw_owner_id.lstrip("-").isdigit() else None
+    webhook_url: Optional[str] = os.getenv("TELEGRAM_WEBHOOK_URL")
+    tts_enabled: bool = os.getenv("TELEGRAM_TTS_ENABLED", "false").lower() == "true"
 
 
 class Settings(BaseModel):
