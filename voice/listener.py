@@ -21,6 +21,7 @@ class VoiceListener:
         self.on_speaking_sentence = on_speaking_sentence
         self.stt           = STTEngine()
         self.tts           = TTSEngine()
+        self.tts_enabled   = True
         self._loop_lock    = threading.Lock()
 
         self.toggle = VoiceToggle(
@@ -94,13 +95,15 @@ class VoiceListener:
                 # Mostrar texto EXACTAMENTE antes de reproducirlo
                 if self.on_speaking_sentence:
                     self.on_speaking_sentence(item)
-                    
-                self.tts.speak(item) # Esto bloquea hasta que termina la frase
+
+                if self.tts_enabled:
+                    self.tts.speak(item)  # Bloquea hasta que termina la frase
             except Exception as e:
                 logging.error(f"[Voice] Error TTS: {e}")
 
     def speak(self, text: str):
-        threading.Thread(target=self.tts.speak, args=(text,), daemon=True).start()
+        if self.tts_enabled:
+            threading.Thread(target=self.tts.speak, args=(text,), daemon=True).start()
 
     def synthesize_for_telegram(self, text: str) -> str:
         return self.tts.synthesize_for_telegram(text)

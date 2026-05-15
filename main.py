@@ -73,15 +73,18 @@ def main():
 
         def worker():
             try:
-                ui_signals.mood_updated.emit(iris.personality.state.mood.value) 
-                
+                ui_signals.mood_updated.emit(iris.personality.state.mood.value)
+
                 response = iris.chat(user_input)
                 print(f"Iris: {response}")
-                
-                # Emitimos la respuesta al globo blanco. 
-                # La UI se encarga de mostrarla y ocultarla automáticamente.
+
+                print(f"[main.handle_ui_input] type={type(response).__name__} len={len(response) if response else 0}")
+                print(f"[main.handle_ui_input] repr (primeros 200): {repr(response[:200]) if response else repr(response)}")
+                print(f"[main.handle_ui_input] emitting text_updated …")
                 ui_signals.text_updated.emit(response)
                 ui_signals.mood_updated.emit(iris.personality.state.mood.value)
+                if tts_enabled[0]:
+                    iris.speak(response)
             except Exception as e:
                 print(f"\n[Error UI Input] {e}")
                 ui_signals.text_updated.emit(f"[Error]\n{str(e)}")
@@ -89,6 +92,16 @@ def main():
         threading.Thread(target=worker, daemon=True).start()
 
     ui_signals.user_text_submitted.connect(handle_ui_input)
+
+    tts_enabled = [True]
+
+    def on_voice_mode_changed(enabled: bool):
+        tts_enabled[0] = enabled
+        iris.set_tts_enabled(enabled)
+        mode_label = "Voz" if enabled else "Solo texto"
+        print(f"[Iris] Modo cambiado: {mode_label}")
+
+    ui_signals.voice_mode_changed.connect(on_voice_mode_changed)
 
     def terminal_loop():
         while True:

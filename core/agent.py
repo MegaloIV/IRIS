@@ -223,6 +223,10 @@ class IrisAgent:
         if self._voice:
             self._voice.stop()
 
+    def set_tts_enabled(self, enabled: bool):
+        if self._voice:
+            self._voice.tts_enabled = enabled
+
     def speak(self, text: str):
         if self._voice:
             self._voice.speak(text)
