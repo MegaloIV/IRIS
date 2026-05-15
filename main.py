@@ -12,7 +12,9 @@ from PyQt6.QtWidgets import QApplication
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
-from ui.avatar import IrisAvatarUI, IrisSignals, TerminalOutputUI
+from ui.avatar import IrisAvatarUI
+from ui.signals import IrisSignals
+from ui.terminal_overlay import TerminalOutputUI
 
 def main():
     print("=" * 50)
