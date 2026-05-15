@@ -55,7 +55,10 @@ def main():
 
     print("[Voice] Iniciando sistema de voz...")
     try:
-        iris.start_voice(on_speaking_sentence=ui_signals.text_updated.emit)
+        iris.start_voice(
+            on_speaking_sentence=ui_signals.text_updated.emit,
+            on_listening_changed=ui_signals.listening_changed.emit,
+        )
         print("[Voice] Listo — presiona el botón Copilot para hablar con Iris.")
     except Exception as e:
         print(f"[Voice] Error: {e}")

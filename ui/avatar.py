@@ -7,8 +7,9 @@ import os
 import logging
 
 from PyQt6.QtWidgets import (QWidget, QLabel, QHBoxLayout, QVBoxLayout,
-                             QApplication, QLineEdit, QPushButton)
-from PyQt6.QtCore import Qt, QPoint
+                             QApplication, QLineEdit, QPushButton,
+                             QGraphicsOpacityEffect)
+from PyQt6.QtCore import Qt, QPoint, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QPixmap
 
 from .signals import IrisSignals
@@ -29,6 +30,7 @@ class IrisAvatarUI(QWidget):
 
         self.signals.text_updated.connect(self.update_subtitles)
         self.signals.mood_updated.connect(self.update_avatar)
+        self.signals.listening_changed.connect(self._on_listening_changed)
 
     def _init_ui(self):
         self.setWindowFlags(
@@ -74,9 +76,30 @@ class IrisAvatarUI(QWidget):
         """)
         self.settings_btn.clicked.connect(self._toggle_settings)
 
+        self.listening_dot = QWidget()
+        self.listening_dot.setFixedSize(10, 10)
+        self.listening_dot.setToolTip("No escuchando")
+        self.listening_dot.setStyleSheet(
+            "background-color: #FF4444; border-radius: 5px; border: none;"
+        )
+
+        self._dot_opacity = QGraphicsOpacityEffect(self.listening_dot)
+        self.listening_dot.setGraphicsEffect(self._dot_opacity)
+        self._dot_opacity.setOpacity(1.0)
+
+        self._dot_anim = QPropertyAnimation(self._dot_opacity, b"opacity")
+        self._dot_anim.setDuration(1000)
+        self._dot_anim.setKeyValueAt(0.0, 1.0)
+        self._dot_anim.setKeyValueAt(0.5, 0.25)
+        self._dot_anim.setKeyValueAt(1.0, 1.0)
+        self._dot_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+        self._dot_anim.setLoopCount(-1)
+
         gear_row = QHBoxLayout()
         gear_row.setContentsMargins(0, 0, 0, 2)
         gear_row.addStretch()
+        gear_row.addWidget(self.listening_dot)
+        gear_row.addSpacing(5)
         gear_row.addWidget(self.settings_btn)
 
         avatar_container = QWidget()
@@ -191,6 +214,21 @@ class IrisAvatarUI(QWidget):
                 Qt.TransformationMode.SmoothTransformation,
             )
             self.avatar_label.setPixmap(pixmap)
+
+    def _on_listening_changed(self, listening: bool):
+        if listening:
+            self.listening_dot.setStyleSheet(
+                "background-color: #44DD44; border-radius: 5px; border: none;"
+            )
+            self.listening_dot.setToolTip("Escuchando")
+            self._dot_anim.start()
+        else:
+            self._dot_anim.stop()
+            self._dot_opacity.setOpacity(1.0)
+            self.listening_dot.setStyleSheet(
+                "background-color: #FF4444; border-radius: 5px; border: none;"
+            )
+            self.listening_dot.setToolTip("No escuchando")
 
     def update_subtitles(self, text: str):
         logger.debug("update_subtitles: type=%s len=%d repr=%r",
