@@ -15,6 +15,7 @@ from telegram import Bot, Update
 from telegram.constants import ChatAction
 
 from config.settings import settings
+from config.prompts import TELEGRAM_INTERFACE_ADDON
 
 logger = logging.getLogger(__name__)
 
@@ -102,11 +103,12 @@ def create_telegram_app(iris) -> FastAPI:
         typing   = asyncio.create_task(_keep_typing(chat_id, stop_evt))
 
         try:
-            # on_delegating fires only when Claude Code is actually invoked;
-            # we're already typing so no extra action needed here.
             response_text = await loop.run_in_executor(
                 None,
-                lambda: iris.delegate_to_claude(user_input),
+                lambda: iris.delegate_to_claude(
+                    user_input,
+                    interface_context=TELEGRAM_INTERFACE_ADDON,
+                ),
             )
         except Exception as e:
             logger.error(f"[Telegram] Error en IrisAgent: {e}")

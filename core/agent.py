@@ -25,6 +25,7 @@ class IrisState(TypedDict):
     trust_level: float
     system_prompt: str
     memory_context: str
+    interface_context: str  # e.g. TELEGRAM_INTERFACE_ADDON — injected at generation time
 
 
 class IrisAgent:
@@ -72,33 +73,39 @@ class IrisAgent:
         changes = self.personality.analyze_input(text)
         self.personality.apply_analysis(changes)
         return {
-            "messages":       [],
-            "current_mood":   self.personality.state.mood.value,
-            "trust_level":    self.personality.state.trust_level,
-            "system_prompt":  self.personality.build_system_prompt(),
-            "memory_context": "",
+            "messages":         [],
+            "current_mood":     self.personality.state.mood.value,
+            "trust_level":      self.personality.state.trust_level,
+            "system_prompt":    self.personality.build_system_prompt(),
+            "memory_context":   "",
+            "interface_context": state["interface_context"],
         }
 
     def _retrieve_memory_node(self, state: IrisState) -> dict:
         text           = state["messages"][-1].content
         memory_context = self.memory.get_relevant_memories(text)
         return {
-            "messages":       [],
-            "current_mood":   state["current_mood"],
-            "trust_level":    state["trust_level"],
-            "system_prompt":  state["system_prompt"],
-            "memory_context": memory_context,
+            "messages":         [],
+            "current_mood":     state["current_mood"],
+            "trust_level":      state["trust_level"],
+            "system_prompt":    state["system_prompt"],
+            "memory_context":   memory_context,
+            "interface_context": state["interface_context"],
         }
 
     def _generate_response_node(self, state: IrisState) -> dict:
-        msgs     = build_messages(state["system_prompt"], state["memory_context"], self.history.get_window(), state["messages"][-1])
+        system_prompt = state["system_prompt"]
+        if state["interface_context"]:
+            system_prompt += "\n\n" + state["interface_context"]
+        msgs     = build_messages(system_prompt, state["memory_context"], self.history.get_window(), state["messages"][-1])
         response = self.llm.invoke(msgs)
         return {
-            "messages":       [response],
-            "current_mood":   state["current_mood"],
-            "trust_level":    state["trust_level"],
-            "system_prompt":  state["system_prompt"],
-            "memory_context": state["memory_context"],
+            "messages":         [response],
+            "current_mood":     state["current_mood"],
+            "trust_level":      state["trust_level"],
+            "system_prompt":    state["system_prompt"],
+            "memory_context":   state["memory_context"],
+            "interface_context": state["interface_context"],
         }
 
     def _update_state_node(self, state: IrisState) -> dict:
@@ -111,15 +118,16 @@ class IrisAgent:
 
     # ─── Interfaz pública ─────────────────────────────────────────────────────
 
-    def chat(self, user_input: str) -> str:
+    def chat(self, user_input: str, interface_context: str = "") -> str:
         """Chat normal — retorna texto completo."""
         self.personality.record_interaction()
         initial_state: IrisState = {
-            "messages":       [HumanMessage(content=user_input)],
-            "current_mood":   self.personality.state.mood.value,
-            "trust_level":    self.personality.state.trust_level,
-            "system_prompt":  self.personality.build_system_prompt(),
-            "memory_context": "",
+            "messages":         [HumanMessage(content=user_input)],
+            "current_mood":     self.personality.state.mood.value,
+            "trust_level":      self.personality.state.trust_level,
+            "system_prompt":    self.personality.build_system_prompt(),
+            "memory_context":   "",
+            "interface_context": interface_context,
         }
         result      = self.graph.invoke(initial_state)
         ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage)]
@@ -172,7 +180,7 @@ class IrisAgent:
 
     # ─── Delegación a Claude Code ─────────────────────────────────────────────
 
-    def delegate_to_claude(self, user_input: str, file_path: str | None = None, on_delegating: Callable | None = None) -> str:
+    def delegate_to_claude(self, user_input: str, file_path: str | None = None, on_delegating: Callable | None = None, interface_context: str = "") -> str:
         """
         Runs Claude Code for complex analysis, injects the raw output as
         internal system context, then generates Iris's response through her
@@ -191,7 +199,7 @@ class IrisAgent:
         intent = IntentAgent(self.analysis_llm).analyze(user_input, file_path)
         if not intent["should_delegate"]:
             print("[IntentAgent] Delegación cancelada — respondiendo directamente")
-            return self.chat(user_input)
+            return self.chat(user_input, interface_context=interface_context)
 
         if on_delegating:
             on_delegating()
@@ -208,6 +216,8 @@ class IrisAgent:
         memory_context  = self.memory.get_relevant_memories(user_input)
         if memory_context:
             system_content += "\n\n" + memory_context
+        if interface_context:
+            system_content += "\n\n" + interface_context
         system_content += (
             "\n\n[Análisis interno — procesado por Claude Code]\n"
             f"{raw_claude}\n"
