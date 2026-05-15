@@ -3,69 +3,23 @@ core/claude_delegate.py
 Detección y delegación de tareas complejas a Claude Code.
 
 Flujo:
-  1. needs_delegation()  — detección rápida por extensiones/keywords (sin LLM)
+  1. needs_delegation()  — siempre True; IntentAgent decide si delegar realmente
   2. IntentAgent.analyze() — Groq entiende el intent real y genera un prompt técnico
   3. ClaudeDelegator.run_sync() — llama a Claude Code con ese prompt optimizado
 """
 
+import base64
 import json
-import re
+import os
 import subprocess
 import threading
 from pathlib import Path
 from typing import Callable
 
-# ─── Detección rápida (pre-filtro sin LLM) ────────────────────────────────────
-
-_FILE_EXTENSIONS = {
-    ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".csv",
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp",
-    ".pptx", ".ppt", ".odt", ".ods", ".txt", ".md",
-}
-
-_COMPLEXITY_KEYWORDS = [
-    "analiza", "analizar", "análisis", "analisis",
-    "resume", "resumir", "resumen",
-    "extrae", "extraer", "extracción", "extraccion",
-    "genera", "generar", "redacta", "redactar",
-    "informe", "reporte", "documento",
-    "compara", "comparar",
-    "transcribe", "transcribir",
-    "summarize", "analyze", "analysis", "report",
-    "explica detalladamente", "explica en detalle",
-]
-
-_FILE_EXT_RE = re.compile(
-    r'\b\S+(?:' + '|'.join(re.escape(e) for e in sorted(_FILE_EXTENSIONS, key=len, reverse=True)) + r')\b',
-    re.IGNORECASE,
-)
-
 
 def needs_delegation(user_input: str) -> tuple[bool, str | None]:
-    """
-    Pre-filtro rápido basado en extensiones y keywords.
-    Returns (should_delegate, file_path_or_None).
-    Si returns True, se debe llamar a IntentAgent para confirmar y optimizar.
-    """
-    # 1. Buscar rutas de archivo reales en el mensaje
-    for match in _FILE_EXT_RE.finditer(user_input):
-        candidate = match.group(0).strip("'\"")
-        p = Path(candidate)
-        if p.exists():
-            return True, str(p.resolve())
-
-    # 2. Menciones de extensiones (sin ruta completa)
-    lower = user_input.lower()
-    for ext in _FILE_EXTENSIONS:
-        if ext in lower:
-            return True, None
-
-    # 3. Keywords de tareas complejas
-    for kw in _COMPLEXITY_KEYWORDS:
-        if kw in lower:
-            return True, None
-
-    return False, None
+    """Always delegates — IntentAgent.analyze() decides whether to actually call Claude Code."""
+    return True, None
 
 
 # ─── Intent Agent ─────────────────────────────────────────────────────────────
@@ -118,6 +72,7 @@ class IntentAgent:
                 "should_delegate": should,
                 "claude_prompt":   claude_prompt,
                 "file_path":       file_path,
+                "task_type":       result.get("task_type", ""),
             }
 
         except Exception as e:
@@ -126,7 +81,70 @@ class IntentAgent:
                 "should_delegate": True,
                 "claude_prompt":   user_input,
                 "file_path":       detected_file_path,
+                "task_type":       "",
             }
+
+
+# ─── Path helpers ─────────────────────────────────────────────────────────────
+
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+_IMAGE_MIME = {
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif":  "image/gif",
+}
+
+
+def windows_to_wsl_path(path: str) -> str:
+    """Convert a Windows path to its WSL /mnt/ equivalent.
+    'C:\\foo\\bar' → '/mnt/c/foo/bar'
+    Already-Unix paths are returned unchanged.
+    """
+    if len(path) >= 2 and path[1] == ":":
+        drive = path[0].lower()
+        rest = path[2:].replace("\\", "/").lstrip("/")
+        return f"/mnt/{drive}/{rest}"
+    return path.replace("\\", "/")
+
+
+def _build_file_prompt(user_prompt: str, file_path: str) -> str:
+    """Append file content to the prompt.
+    Images are embedded as base64 data URIs; other files use the WSL path.
+    """
+    ext = Path(file_path).suffix.lower()
+    if ext in _IMAGE_EXTENSIONS:
+        wsl_path = windows_to_wsl_path(file_path)
+        mime = _IMAGE_MIME.get(ext, "image/png")
+        with open(wsl_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        return (
+            f"{user_prompt}\n\n"
+            f"[Attached image: {Path(file_path).name}]\n"
+            f"data:{mime};base64,{b64}"
+        )
+    else:
+        wsl_path = windows_to_wsl_path(file_path)
+        return f"{user_prompt}\n\nFile path: {wsl_path}"
+
+
+FILE_TASK_TYPES = [
+    "file_creation", "file_reading", "file_search",
+    "report_generation", "image_analysis", "document_analysis",
+]
+
+
+def _build_prompt(user_input: str, intent: dict) -> str:
+    """Return the prompt to send to Claude Code, injecting PATH_ env vars only for file tasks."""
+    prompt = intent["claude_prompt"]
+    if intent.get("task_type") in FILE_TASK_TYPES:
+        paths = {k: v for k, v in os.environ.items() if k.startswith("PATH_")}
+        if paths:
+            path_context = "Available paths:\n" + "\n".join(f"- {k}: {v}" for k, v in paths.items())
+            prompt = f"{path_context}\n\n{prompt}"
+    return prompt
 
 
 # ─── Claude Code subprocess ───────────────────────────────────────────────────
@@ -138,12 +156,20 @@ class ClaudeDelegator:
 
     def run_sync(self, prompt: str, file_path: str | None = None) -> str:
         """Llama a Claude Code sincrónicamente y devuelve el texto resultante."""
-        full_prompt = prompt
         if file_path:
-            full_prompt = f"{prompt}\n\nFile path: {file_path}"
+            try:
+                full_prompt = _build_file_prompt(prompt, file_path)
+            except Exception as e:
+                print(f"[Claude Code] Error leyendo archivo adjunto: {e}")
+                full_prompt = f"{prompt}\n\nFile path: {windows_to_wsl_path(file_path)}"
+        else:
+            full_prompt = prompt
+
+        print(f"[Claude Code] PROMPT ENVIADO:\n{full_prompt}")
 
         cmd = [
-            "claude",
+            "wsl",
+            "/home/matias/.npm-global/bin/claude",
             "--dangerously-skip-permissions",
             "-p", full_prompt,
         ]
@@ -155,11 +181,16 @@ class ClaudeDelegator:
                 text=True,
                 timeout=self.TIMEOUT_SECONDS,
             )
+            print(f"[Claude Code] RETURN CODE: {result.returncode}")
+            print(f"[Claude Code] STDERR: {result.stderr}")
             if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-            if result.stderr.strip():
-                return f"[Error de Claude Code]: {result.stderr.strip()[:500]}"
-            return "[Claude Code no devolvió respuesta]"
+                raw_response = result.stdout.strip()
+            elif result.stderr.strip():
+                raw_response = f"[Error de Claude Code]: {result.stderr.strip()[:500]}"
+            else:
+                raw_response = "[Claude Code no devolvió respuesta]"
+            print(f"[Claude Code] RESPUESTA COMPLETA: '{raw_response}'")
+            return raw_response
         except subprocess.TimeoutExpired:
             return f"[Claude Code: timeout después de {self.TIMEOUT_SECONDS}s]"
         except FileNotFoundError:

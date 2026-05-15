@@ -68,9 +68,9 @@ def main():
     print(f"\n[Sistema listo] — {iris.personality.get_status_summary()}")
     print("-" * 50)
 
-    def handle_ui_input(user_input):
+    def handle_ui_input(user_input, attached_file=""):
         print(f"\nTú (UI): {user_input}")
-        
+
         if user_input.startswith("/"):
             cmd_output = _handle_command(user_input, iris)
             ui_signals.terminal_output_updated.emit(cmd_output)
@@ -81,7 +81,10 @@ def main():
                 from core.claude_delegate import needs_delegation
                 ui_signals.mood_updated.emit(iris.personality.state.mood.value)
 
-                should_delegate, file_path = needs_delegation(user_input)
+                if attached_file:
+                    should_delegate, file_path = True, attached_file
+                else:
+                    should_delegate, file_path = needs_delegation(user_input)
                 if should_delegate:
                     ui_signals.claude_thinking_changed.emit(True)
                     response = iris.delegate_to_claude(user_input, file_path)

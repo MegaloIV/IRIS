@@ -5,6 +5,7 @@ Ventana principal del avatar flotante de Iris.
 
 import os
 import logging
+from pathlib import Path
 
 from PyQt6.QtWidgets import (QWidget, QLabel, QHBoxLayout, QVBoxLayout,
                              QApplication, QLineEdit, QPushButton,
@@ -24,6 +25,7 @@ class IrisAvatarUI(QWidget):
         super().__init__()
         self.signals     = signals
         self.avatar_path = "assets/avatars/"
+        self._pending_file: str | None = None
 
         self.settings_panel = SettingsPanel()
         self._init_ui()
@@ -41,6 +43,7 @@ class IrisAvatarUI(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet("background: transparent; border: none;")
+        self.setAcceptDrops(True)
 
         main_layout = QVBoxLayout()
         main_layout.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
@@ -173,7 +176,31 @@ class IrisAvatarUI(QWidget):
         terminal_layout.addWidget(self.terminal_input)
         terminal_layout.addWidget(self.terminal_btn)
 
+        self._file_chip = QPushButton("")
+        self._file_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._file_chip.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(80, 130, 200, 200);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 2px 8px;
+                font-size: 9px;
+                max-height: 20px;
+            }
+            QPushButton:hover { background-color: rgba(180, 60, 60, 200); }
+        """)
+        self._file_chip.setVisible(False)
+        self._file_chip.setToolTip("Click para quitar el archivo adjunto")
+        self._file_chip.clicked.connect(self._clear_attachment)
+
+        file_chip_layout = QHBoxLayout()
+        file_chip_layout.setAlignment(Qt.AlignmentFlag.AlignRight)
+        file_chip_layout.setContentsMargins(0, 0, 0, 0)
+        file_chip_layout.addWidget(self._file_chip)
+
         main_layout.addLayout(upper_row)
+        main_layout.addLayout(file_chip_layout)
         main_layout.addLayout(terminal_layout)
         self.setLayout(main_layout)
 
@@ -213,9 +240,35 @@ class IrisAvatarUI(QWidget):
     def _on_terminal_submit(self):
         text = self.terminal_input.text().strip()
         if text:
-            self.signals.user_text_submitted.emit(text)
+            self.signals.user_text_submitted.emit(text, self._pending_file or "")
+            self._pending_file = None
+            self._file_chip.setVisible(False)
             self.terminal_input.clear()
         self.terminal_input.setVisible(False)
+
+    # ── Drag & drop ───────────────────────────────────────────────────────────
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if not urls:
+            return
+        path = urls[0].toLocalFile()
+        if not path:
+            return
+        self._pending_file = path
+        self._file_chip.setText(f"  {Path(path).name}  x")
+        self._file_chip.setVisible(True)
+        if not self.terminal_input.isVisible():
+            self.terminal_input.setVisible(True)
+            self.terminal_input.setFocus()
+
+    def _clear_attachment(self):
+        self._pending_file = None
+        self._file_chip.setVisible(False)
 
     # ── Avatar & subtitles ────────────────────────────────────────────────────
 

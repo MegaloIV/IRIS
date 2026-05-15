@@ -300,29 +300,33 @@ Responde SOLO con JSON válido:
     "reason": "explicación de la carga emocional, técnica o social encontrada"
 }}"""
 
-DELEGATION_INTENT_PROMPT = """You are a task router for an AI assistant system. \
-Your job is to analyze what the user actually wants and decide whether it requires \
-deep processing by a specialized external tool (Claude Code), then produce an optimized \
-technical prompt for that tool if needed.
+DELEGATION_INTENT_PROMPT = """You are a task router. Decide if the user's request needs \
+an external tool (Claude Code) to execute — file creation, reading, search, code generation, \
+image/document analysis, or any multi-step task that produces a real output on disk or requires \
+reading actual file contents. Pure conversation and simple questions stay local.
 
 User message: "{user_input}"{file_hint}
 
 Respond ONLY with valid JSON, no extra text:
 {{
-    "should_delegate": <true if the task requires file reading, document analysis, data extraction, \
-code generation, image understanding, or multi-step technical analysis; \
-false for casual conversation, simple factual questions, or anything answerable directly>,
-    "claude_prompt": "<If should_delegate is true: a precise, self-contained English prompt for \
-the external tool. Start with an action verb (Read, Analyze, Extract, Generate, Compare). \
-Mention explicit file paths. Specify the desired output format. Max 3 sentences. \
+    "should_delegate": <true if the task requires executing something or reading real files; false for conversation>,
+    "claude_prompt": "<If should_delegate is true: write this exactly as you would phrase a direct \
+request to a capable assistant who has access to the file system. Use the user's own words and intent. \
+Reference PATH_ variables by name (e.g. PATH_DESKTOP, PATH_DOCUMENTS) instead of hardcoded paths. \
+Preserve the language, tone, and specifics of the original request — do not paraphrase into generic \
+technical language. If the user asked in Spanish, keep the content details in Spanish. \
 Empty string if should_delegate is false.>",
-    "file_path": "<Absolute or relative file path extracted from the message, or null if none>",
-    "task_type": "<document_analysis|code_analysis|data_extraction|report_generation|image_analysis|comparison|conversational|other>"
+    "file_path": "<file path from the message if one was explicitly mentioned, otherwise null>",
+    "task_type": "<file_creation|file_reading|file_search|report_generation|image_analysis|document_analysis|code_generation|conversational|other>"
 }}
 
-Examples of claude_prompt values:
-- "Read /home/user/report.pdf and extract the main conclusions and key figures as a bullet-point summary."
-- "Analyze the Python file /project/main.py and identify any security vulnerabilities or inefficiencies."
-- "Compare the two Excel files /data/q1.xlsx and /data/q2.xlsx and summarize the differences in a table."
-- "Generate a formal technical report based on this requirement: {user_input}"
+Examples of good claude_prompt values:
+- User: "crea un txt en el escritorio que diga lo mucho que me gusta el azul"
+  → "Create a text file at PATH_DESKTOP/azul.txt with content expressing love for the color blue, written in Spanish in first person"
+- User: "resume el PDF de la reunión de ayer"
+  → "Read the PDF at PATH_DOCUMENTS/reunion_ayer.pdf and write a concise summary in Spanish"
+- User: "busca en mis documentos algún archivo sobre el proyecto Halcón"
+  → "Search PATH_DOCUMENTS for any files related to a project called Halcón and list what you find"
+- User: "analyze main.py for security issues"
+  → "Read main.py and identify any security vulnerabilities, explaining each one with the affected line"
 """

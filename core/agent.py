@@ -248,7 +248,7 @@ class IrisAgent:
         """
         import uuid
         from datetime import datetime, timedelta
-        from core.claude_delegate import ClaudeDelegator, IntentAgent
+        from core.claude_delegate import ClaudeDelegator, IntentAgent, _build_prompt
 
         # 1. Intent agent: semantic understanding + prompt optimization
         intent = IntentAgent(self.analysis_llm).analyze(user_input, file_path)
@@ -260,7 +260,7 @@ class IrisAgent:
 
         # 2. Call Claude Code with the optimized prompt
         delegator  = ClaudeDelegator()
-        raw_claude = delegator.run_sync(intent["claude_prompt"], intent["file_path"])
+        raw_claude = delegator.run_sync(_build_prompt(user_input, intent), intent["file_path"])
 
         print(f"[Claude Code] respuesta recibida ({len(raw_claude)} chars)")
 
