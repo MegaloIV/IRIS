@@ -15,6 +15,26 @@ warnings.filterwarnings("ignore", category=UserWarning)
 from ui.avatar import IrisAvatarUI
 from ui.signals import IrisSignals
 from ui.terminal_overlay import TerminalOutputUI
+from config.settings import settings
+
+
+def _run_telegram_server(iris) -> None:
+    """Run the FastAPI webhook server in a dedicated thread with its own event loop."""
+    import asyncio
+    import uvicorn
+    from interfaces.telegram_bot import create_telegram_app
+
+    app  = create_telegram_app(iris)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    config = uvicorn.Config(
+        app,
+        host=settings.server.host,
+        port=settings.server.port,
+        loop="none",
+        log_level="warning",
+    )
+    loop.run_until_complete(uvicorn.Server(config).serve())
 
 def main():
     print("=" * 50)
@@ -34,7 +54,7 @@ def main():
     iris = IrisAgent()
 
     original_chat_stream = iris.chat_stream_voice
-    
+
     def hooked_chat_stream(user_input, on_sentence):
         changes = iris.personality.analyze_input(user_input)
         if changes.get("mood"):
@@ -43,9 +63,26 @@ def main():
 
     iris.chat_stream_voice = hooked_chat_stream
 
+    # ── Telegram (optional) ──────────────────────────────────────────────────
+    _cf_proc = None
+    if settings.telegram.enabled and settings.telegram.bot_token:
+        try:
+            from scripts.start_telegram import start_cloudflared, set_webhook
+            _cf_proc, public_url = start_cloudflared(settings.server.port)
+            print(f"[cloudflared] URL pública: {public_url}")
+            set_webhook(settings.telegram.bot_token, public_url)
+            threading.Thread(target=_run_telegram_server, args=(iris,), daemon=True).start()
+            print("[Telegram] Bot activo — envía un mensaje al bot para empezar.")
+        except Exception as e:
+            print(f"[Telegram] Error al iniciar: {e}")
+            print("[Telegram] Continuando sin Telegram.")
+    # ─────────────────────────────────────────────────────────────────────────
+
     def shutdown(sig=None, frame=None):
         print("\n\n[Iris] Guardando memorias antes de cerrar...")
         iris.shutdown()
+        if _cf_proc:
+            _cf_proc.kill()
         print("[Iris] Hasta luego.")
         QApplication.quit()
         sys.exit(0)
