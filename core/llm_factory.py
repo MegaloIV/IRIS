@@ -1,42 +1,133 @@
 """
 core/llm_factory.py
 Crea LLMs según el proveedor configurado en settings.
+
+Para Groq se usa _RotatingGroqLLM: si una key falla por rate-limit,
+cuota agotada o auth inválida, rota automáticamente a la siguiente.
 """
 
+import logging
 from langchain_core.language_models import BaseChatModel
 from config.settings import settings
 
 
-def get_llm() -> BaseChatModel:
+# ─── Detección de errores rotables ────────────────────────────────────────────
+
+def _should_rotate(exc: Exception) -> bool:
+    """True si el error indica que la key actual está agotada o bloqueada."""
+    msg       = str(exc).lower()
+    type_name = type(exc).__name__.lower()
+    return (
+        "429"            in msg
+        or "rate"        in msg
+        or "quota"       in msg
+        or "limit"       in msg
+        or "401"         in msg
+        or "auth"        in msg
+        or "ratelimit"   in type_name
+        or "authentication" in type_name
+    )
+
+
+# ─── Wrapper con rotación ─────────────────────────────────────────────────────
+
+class _RotatingGroqLLM:
+    """
+    Duck-compatible con BaseChatModel (implementa invoke y stream).
+    Mantiene N instancias de ChatGroq —  una por key — y rota cuando
+    la activa devuelve un error de rate-limit o autenticación.
+    """
+
+    def __init__(self, keys: list[str], model: str, temperature: float, **kwargs):
+        from langchain_groq import ChatGroq
+        self._clients = [
+            ChatGroq(model=model, temperature=temperature, api_key=k, **kwargs)
+            for k in keys
+        ]
+        self._current = 0
+        logging.info(f"[Groq] {len(keys)} API keys cargadas — rotación automática activa.")
+
+    def _rotate(self):
+        self._current = (self._current + 1) % len(self._clients)
+        logging.warning(f"[Groq] Rotando a key {self._current + 1}/{len(self._clients)}")
+
+    def invoke(self, input, **kwargs):
+        for attempt in range(len(self._clients)):
+            try:
+                return self._clients[self._current].invoke(input, **kwargs)
+            except Exception as e:
+                if _should_rotate(e):
+                    logging.warning(
+                        f"[Groq] Key {self._current + 1} falló "
+                        f"({type(e).__name__}) — rotando..."
+                    )
+                    self._rotate()
+                else:
+                    raise
+        raise RuntimeError(
+            f"[Groq] Todas las {len(self._clients)} API keys agotadas o inválidas."
+        )
+
+    def stream(self, input, **kwargs):
+        """
+        Intenta el stream con la key actual. Si falla antes o durante la
+        generación, rota y reintenta desde el principio con la key siguiente.
+        """
+        for attempt in range(len(self._clients)):
+            try:
+                yield from self._clients[self._current].stream(input, **kwargs)
+                return
+            except Exception as e:
+                if _should_rotate(e):
+                    logging.warning(
+                        f"[Groq] Key {self._current + 1} falló en stream "
+                        f"({type(e).__name__}) — rotando y reintentando..."
+                    )
+                    self._rotate()
+                else:
+                    raise
+        raise RuntimeError(
+            f"[Groq] Todas las {len(self._clients)} API keys agotadas o inválidas."
+        )
+
+
+# ─── Factories públicas ───────────────────────────────────────────────────────
+
+def get_llm():
     """Modelo principal para las respuestas de Iris."""
     provider    = settings.llm.provider
     model       = settings.llm.model
     temperature = settings.llm.temperature
-    api_key     = settings.llm.api_key
 
     match provider:
         case "groq":
-            from langchain_groq import ChatGroq
-            return ChatGroq(model=model, temperature=temperature, api_key=api_key)
+            keys = settings.llm.api_keys
+            if not keys:
+                raise ValueError("No hay API keys de Groq configuradas. Define GROQ_API_KEYS en .env")
+            if len(keys) == 1:
+                from langchain_groq import ChatGroq
+                return ChatGroq(model=model, temperature=temperature, api_key=keys[0])
+            return _RotatingGroqLLM(keys=keys, model=model, temperature=temperature)
+
         case "ollama":
             from langchain_ollama import ChatOllama
             return ChatOllama(model=model, temperature=temperature)
-#       case "anthropic":
-            from langchain_anthropic import ChatAnthropic
-            return ChatAnthropic(model=model, temperature=temperature, api_key=api_key)
-#       case "openai":
-            from langchain_openai import ChatOpenAI
-            return ChatOpenAI(model=model, temperature=temperature, api_key=api_key)
+
         case _:
             raise ValueError(f"Provider '{provider}' no soportado.")
 
 
-def get_analysis_llm() -> BaseChatModel:
-    """Modelo rápido para análisis, traducción y extracción."""
-    from langchain_groq import ChatGroq
-    return ChatGroq(
-        model       = settings.llm.analysis_model,
-        temperature = 0.0,
-        api_key     = settings.llm.api_key,
-        model_kwargs={"response_format": {"type": "json_object"}}
-    )
+def get_analysis_llm():
+    """Modelo rápido para análisis, clasificación y extracción (forzado a JSON)."""
+    keys = settings.llm.api_keys
+    if not keys:
+        raise ValueError("No hay API keys de Groq configuradas. Define GROQ_API_KEYS en .env")
+
+    json_kwargs = {"model_kwargs": {"response_format": {"type": "json_object"}}}
+    model       = settings.llm.analysis_model
+
+    if len(keys) == 1:
+        from langchain_groq import ChatGroq
+        return ChatGroq(model=model, temperature=0.0, api_key=keys[0], **json_kwargs)
+
+    return _RotatingGroqLLM(keys=keys, model=model, temperature=0.0, **json_kwargs)

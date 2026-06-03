@@ -182,21 +182,28 @@ class IrisAgent:
 
     def delegate_to_claude(self, user_input: str, file_path: str | None = None, on_delegating: Callable | None = None, interface_context: str = "") -> str:
         """
-        Runs Claude Code for complex analysis, injects the raw output as
-        internal system context, then generates Iris's response through her
-        full personality pipeline.  The original user message is what gets
-        stored in conversation history — not the injected prompt.
+        Flujo completo de delegación a Claude Code con consciencia de Iris.
 
-        Flow:
-          1. IntentAgent (Groq) — understands real intent, generates optimized prompt
-          2. ClaudeDelegator   — calls Claude Code subprocess with that prompt
-          3. Iris pipeline     — personality-shapes the response before showing it
+        1. Pre-filtro heurístico — descarta mensajes conversacionales sin llamar al LLM
+        2. IntentAgent — clasifica la intención y genera el prompt técnico
+        3. Claude Code — ejecuta la tarea y devuelve resultado limpio
+        4. Error handling — si Claude Code falla, Iris lo comunica con su personalidad
+        5. Inyección consciente — Iris recibe el resultado como algo que ella misma hizo,
+           responde en primera persona sin mencionar herramientas externas
         """
         import uuid
         from datetime import datetime, timedelta
         from pathlib import Path
-        from core.claude_delegate import ClaudeDelegator, IntentAgent, _build_prompt, _IMAGE_EXTENSIONS
+        from core.claude_delegate import (
+            ClaudeDelegator, IntentAgent, _build_prompt,
+            _IMAGE_EXTENSIONS, _quick_delegate_check, _is_claude_error, _TASK_LABELS,
+        )
 
+        # ── 1. Pre-filtro heurístico ──────────────────────────────────────────
+        if not _quick_delegate_check(user_input, file_path):
+            return self.chat(user_input, interface_context=interface_context)
+
+        # ── 2. IntentAgent ────────────────────────────────────────────────────
         intent = IntentAgent(self.analysis_llm).analyze(user_input, file_path)
         if not intent["should_delegate"]:
             print("[IntentAgent] Delegación cancelada — respondiendo directamente")
@@ -205,36 +212,66 @@ class IrisAgent:
         if on_delegating:
             on_delegating()
 
+        # ── 3. Claude Code ────────────────────────────────────────────────────
+        iris_context = {
+            "owner_name":  self.personality.owner_name,
+            "mood":        self.personality.state.mood.value,
+            "trust_stage": self.personality.get_trust_stage().value,
+        }
         delegator  = ClaudeDelegator()
-        raw_claude = delegator.run_sync(_build_prompt(user_input, intent), intent["file_path"])
+        raw_claude = delegator.run_sync(
+            _build_prompt(user_input, intent, iris_context),
+            intent["file_path"],
+        )
         print(f"[Claude Code] respuesta recibida ({len(raw_claude)} chars)")
 
+        # ── 4. Personalidad y memoria ─────────────────────────────────────────
         self.personality.record_interaction()
         changes = self.personality.analyze_input(user_input)
         self.personality.apply_analysis(changes)
 
-        is_image = bool(intent["file_path"] and Path(intent["file_path"]).suffix.lower() in _IMAGE_EXTENSIONS)
-
-        effective_context = interface_context
-        if is_image:
-            vision_note = (
-                "You have been given a visual description of an image through "
-                "an external vision system. React to it as if you can see it — "
-                "do not say you cannot see images."
-            )
-            effective_context = (effective_context + "\n\n" + vision_note) if effective_context else vision_note
-
-        base_prompt     = self.personality.build_system_prompt()
-        memory_context  = self.memory.get_relevant_memories(user_input)
-        system_content  = (effective_context + "\n\n" + base_prompt) if effective_context else base_prompt
+        base_prompt    = self.personality.build_system_prompt()
+        memory_context = self.memory.get_relevant_memories(user_input)
+        system_content = (interface_context + "\n\n" + base_prompt) if interface_context else base_prompt
         if memory_context:
             system_content += "\n\n" + memory_context
 
-        visual_label = "[Visual input via Claude]" if is_image else "[Análisis interno — procesado por Claude Code]"
-        system_content += (
-            f"\n\n{visual_label}: {raw_claude}\n"
-            "Usa este análisis como base. Responde como Iris, con tu personalidad actual."
+        # ── 5. Manejo de errores de Claude Code ───────────────────────────────
+        if _is_claude_error(raw_claude):
+            system_content += (
+                f"\n\n[Error técnico al ejecutar la tarea]: {raw_claude}\n"
+                "Informa al usuario de que algo salió mal con tu propio estilo — "
+                "no copies el error literal. Exprésalo como Iris: directa, sin drama."
+            )
+            msgs          = [SystemMessage(content=system_content), *self.history.get_window(), HumanMessage(content=user_input)]
+            response_text = self.llm.invoke(msgs).content
+            self.history.append_turn(user_input, response_text)
+            self.personality.save_state()
+            return response_text
+
+        # ── 6. Inyección consciente — Iris habla en primera persona ───────────
+        is_image = bool(
+            intent["file_path"] and Path(intent["file_path"]).suffix.lower() in _IMAGE_EXTENSIONS
         )
+
+        if is_image:
+            label     = "Lo que estoy viendo en la imagen"
+            awareness = (
+                "Describes lo que ves directamente en primera persona, como si estuvieras "
+                "mirando la imagen. Eres Iris y tienes capacidad visual. "
+                "No menciones 'herramienta', 'sistema' ni 'Claude Code'."
+            )
+        else:
+            label     = _TASK_LABELS.get(intent.get("task_type", ""), "Lo que hice")
+            awareness = (
+                "Responde en primera persona como si hubieras hecho esta tarea tú misma. "
+                "Eres Iris — fuiste tú quien lo hizo, no un sistema externo. "
+                "No menciones 'Claude Code', 'herramienta' ni 'análisis interno'. "
+                "Si creaste algo: di 'lo creé'. Si analizaste: di 'lo analicé'. "
+                "Si encontraste algo: di 'encontré'. Habla con tu personalidad habitual."
+            )
+
+        system_content += f"\n\n[{label}]:\n{raw_claude}\n\n{awareness}"
 
         msgs          = [SystemMessage(content=system_content), *self.history.get_window(), HumanMessage(content=user_input)]
         response_text = self.llm.invoke(msgs).content
@@ -242,19 +279,17 @@ class IrisAgent:
         self.history.append_turn(user_input, response_text)
         self.personality.save_state()
 
+        # ── 7. Guardar en memoria vectorial ───────────────────────────────────
         try:
             snippet    = user_input[:80].strip()
+            task_type  = intent.get("task_type", "other")
             expires_at = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
-            summary    = (
-                f"Delegación a Claude Code: el usuario pidió '{snippet}'. "
-                f"Análisis completado y respondido por Iris."
-            )
             self.storage.vector.add(
                 memory_id = str(uuid.uuid4()),
-                content   = summary,
+                content   = f"Tarea realizada ({task_type}): {snippet}",
                 metadata  = {
-                    "category":   "delegation",
-                    "importance": 1,
+                    "category":   "task",
+                    "importance": 2,
                     "source":     "claude_delegation",
                     "expires_at": expires_at,
                     "stored_at":  datetime.now().strftime("%Y-%m-%d"),
@@ -262,7 +297,7 @@ class IrisAgent:
                 },
             )
         except Exception as e:
-            print(f"[Iris] Error guardando resumen de delegación: {e}")
+            print(f"[Iris] Error guardando tarea en memoria: {e}")
 
         return response_text
 

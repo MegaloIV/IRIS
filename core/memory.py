@@ -6,6 +6,7 @@ Extrae memorias cada 30 mensajes usando un agente que decide si es relevante.
 
 import json
 import logging
+import re
 import threading
 import unicodedata
 import uuid
@@ -66,6 +67,7 @@ class MemoryManager:
         self.timeout_mins = settings.memory.session_timeout_minutes
         self.stm_persist  = settings.memory.stm_persist_messages
 
+        self._lock = threading.Lock()
         self._session_buffer: list[dict] = []
         self._session_timer: Optional[threading.Timer] = None
         self._message_count = 0  # contador para extracción cada N mensajes
@@ -76,15 +78,18 @@ class MemoryManager:
 
     def add_to_session(self, role: str, content: str):
         msg = {"role": role, "content": content, "timestamp": datetime.now().isoformat()}
-        self._session_buffer.append(msg)
         self.storage.history.save_message(role, content)
-        self._message_count += 1
 
-        # Cada 30 mensajes, el agente decide si hay algo relevante
-        if self._message_count >= self.EXTRACT_EVERY:
-            self._message_count = 0
-            buffer = self._session_buffer.copy()
-            # Correr en background para no bloquear la conversación
+        with self._lock:
+            self._session_buffer.append(msg)
+            self._message_count += 1
+            should_extract = self._message_count >= self.EXTRACT_EVERY
+            if should_extract:
+                self._message_count = 0
+                buffer = self._session_buffer.copy()
+
+        # Cada 20 mensajes, el agente decide si hay algo relevante
+        if should_extract:
             threading.Thread(
                 target=self._check_and_extract,
                 args=(buffer,),
@@ -95,21 +100,23 @@ class MemoryManager:
         self._reset_session_timer()
 
     def _reset_session_timer(self):
-        if self._session_timer:
-            self._session_timer.cancel()
-        timer = threading.Timer(self.timeout_mins * 60, self._close_session)
-        timer.daemon = True
-        timer.start()
-        self._session_timer = timer
+        with self._lock:
+            if self._session_timer:
+                self._session_timer.cancel()
+            timer = threading.Timer(self.timeout_mins * 60, self._close_session)
+            timer.daemon = True
+            timer.start()
+            self._session_timer = timer
 
     def _close_session(self):
-        if not self._session_buffer:
-            return
-        logging.info("[Memory] Sesión cerrada por inactividad — extrayendo memorias...")
-        buffer = self._session_buffer.copy()
-        self._session_buffer = []
-        self._session_timer  = None
-        self._message_count  = 0
+        with self._lock:
+            if not self._session_buffer:
+                return
+            logging.info("[Memory] Sesión cerrada por inactividad — extrayendo memorias...")
+            buffer = self._session_buffer.copy()
+            self._session_buffer = []
+            self._session_timer  = None
+            self._message_count  = 0
         self._extract_and_store(buffer)
 
     def force_close_session(self):
@@ -135,7 +142,7 @@ class MemoryManager:
                 conversation = conversation,
             )
             response = self.analysis_llm.invoke(prompt)
-            content  = response.content.strip().replace("```json", "").replace("```", "").strip()
+            content  = re.sub(r'```(?:json)?\s*', '', response.content).strip()
             result   = json.loads(content)
 
             if result.get("relevant", False):
@@ -169,7 +176,7 @@ class MemoryManager:
                 current_date = current_date,
             )
             response = self.analysis_llm.invoke(prompt)
-            content  = response.content.strip().replace("```json", "").replace("```", "").strip()
+            content  = re.sub(r'```(?:json)?\s*', '', response.content).strip()
             facts    = json.loads(content).get("facts", [])
 
             for fact in facts:
@@ -196,7 +203,7 @@ class MemoryManager:
                 current_date = current_date,
             )
             response = self.analysis_llm.invoke(prompt)
-            content  = response.content.strip().replace("```json", "").replace("```", "").strip()
+            content  = re.sub(r'```(?:json)?\s*', '', response.content).strip()
             graph    = json.loads(content)
 
             for entity in graph.get("entities", []):
@@ -224,7 +231,7 @@ class MemoryManager:
         try:
             prompt   = GRAPH_QUERY_PROMPT.format(text=text)
             response = self.analysis_llm.invoke(prompt)
-            content  = response.content.strip().replace("```json", "").replace("```", "").strip()
+            content  = re.sub(r'```(?:json)?\s*', '', response.content).strip()
             result   = json.loads(content)
             return {
                 "entities":       result.get("entities", []),
@@ -236,7 +243,13 @@ class MemoryManager:
 
     def get_relevant_memories(self, query: str, n_results: int = 5) -> str:
         vector_block = self._get_vector_context(query, n_results)
-        graph_block  = self._get_graph_context(query)
+
+        # Cross-referencing: la extracción de entidades del grafo usa tanto la
+        # query del usuario como los hechos que ya trajo la búsqueda vectorial.
+        # Así si el vector devuelve "le gusta Python" y el usuario pregunta
+        # "¿cómo va?", el grafo puede recuperar relaciones sobre Python.
+        enriched_query = f"{query}\n{vector_block}" if vector_block else query
+        graph_block    = self._get_graph_context(enriched_query)
 
         if not vector_block and not graph_block:
             return ""

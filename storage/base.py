@@ -46,9 +46,15 @@ class BaseGraphStorage(ABC):
 
     @abstractmethod
     def add_relation(self, from_name: str, relation: str, to_name: str, properties: dict = None) -> None: ...
-    
+
     @abstractmethod
     def get_context(self, entity_name: str, depth: int = 2) -> list[dict]: ...
+
+    @abstractmethod
+    def get_relevant_context(self, entities: list, relation_types: list, owner_name: str) -> str: ...
+
+    @abstractmethod
+    def get_owner_graph(self, owner_name: str, depth: int = 1) -> str: ...
 
     @abstractmethod
     def save(self) -> None: ...

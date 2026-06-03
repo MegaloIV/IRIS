@@ -36,6 +36,22 @@ def _run_telegram_server(iris) -> None:
     )
     loop.run_until_complete(uvicorn.Server(config).serve())
 
+
+def _telegram_send_sync(token: str, chat_id: int, text: str) -> bool:
+    """Send a Telegram message via HTTP (no async loop needed)."""
+    import requests
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=10,
+        )
+        return r.ok
+    except Exception as e:
+        import logging
+        logging.warning(f"[Proactive] Telegram send falló: {e}")
+        return False
+
 def main():
     print("=" * 50)
     print("  IRIS — Iniciando sistema...")
@@ -56,15 +72,15 @@ def main():
     original_chat_stream = iris.chat_stream_voice
 
     def hooked_chat_stream(user_input, on_sentence):
-        changes = iris.personality.analyze_input(user_input)
-        if changes.get("mood"):
-            ui_signals.mood_updated.emit(changes["mood"].value)
-        return original_chat_stream(user_input, on_sentence)
+        result = original_chat_stream(user_input, on_sentence)
+        ui_signals.mood_updated.emit(iris.personality.state.mood.value)
+        return result
 
     iris.chat_stream_voice = hooked_chat_stream
 
     # ── Telegram (optional) ──────────────────────────────────────────────────
-    _cf_proc = None
+    _cf_proc        = None
+    _telegram_active = False
     if settings.telegram.enabled and settings.telegram.bot_token:
         try:
             from scripts.start_telegram import start_cloudflared, set_webhook
@@ -72,14 +88,49 @@ def main():
             print(f"[cloudflared] URL pública: {public_url}")
             set_webhook(settings.telegram.bot_token, public_url)
             threading.Thread(target=_run_telegram_server, args=(iris,), daemon=True).start()
+            _telegram_active = True
             print("[Telegram] Bot activo — envía un mensaje al bot para empezar.")
         except Exception as e:
             print(f"[Telegram] Error al iniciar: {e}")
             print("[Telegram] Continuando sin Telegram.")
     # ─────────────────────────────────────────────────────────────────────────
 
+    # ── Motor proactivo ───────────────────────────────────────────────────────
+    _proactive_engine = None
+    try:
+        from core.proactive import ProactiveEngine
+        from config.prompts import TELEGRAM_INTERFACE_ADDON
+
+        def _proactive_send(text: str):
+            """Intenta Telegram primero; cae en UI de escritorio si no hay."""
+            if (
+                _telegram_active
+                and settings.telegram.bot_token
+                and settings.telegram.owner_id
+            ):
+                sent = _telegram_send_sync(
+                    settings.telegram.bot_token,
+                    settings.telegram.owner_id,
+                    text,
+                )
+                if sent:
+                    return
+            # Fallback: UI de escritorio
+            ui_signals.text_updated.emit(text)
+            if iris._voice:
+                iris.speak(text)
+
+        iface_ctx = TELEGRAM_INTERFACE_ADDON if _telegram_active else ""
+        _proactive_engine = ProactiveEngine(iris, _proactive_send, interface_context=iface_ctx)
+        _proactive_engine.start()
+    except Exception as e:
+        print(f"[Proactive] No se pudo iniciar el motor proactivo: {e}")
+    # ─────────────────────────────────────────────────────────────────────────
+
     def shutdown(sig=None, frame=None):
         print("\n\n[Iris] Guardando memorias antes de cerrar...")
+        if _proactive_engine:
+            _proactive_engine.stop()
         iris.shutdown()
         if _cf_proc:
             _cf_proc.kill()
@@ -117,17 +168,16 @@ def main():
             try:
                 ui_signals.mood_updated.emit(iris.personality.state.mood.value)
 
-                response = iris.delegate_to_claude(
-                    user_input,
-                    attached_file or None,
-                    on_delegating=lambda: ui_signals.claude_thinking_changed.emit(True),
-                )
+                if claude_delegation[0]:
+                    response = iris.delegate_to_claude(
+                        user_input,
+                        attached_file or None,
+                        on_delegating=lambda: ui_signals.claude_thinking_changed.emit(True),
+                    )
+                else:
+                    response = iris.chat(user_input)
 
                 print(f"Iris: {response}")
-
-                print(f"[main.handle_ui_input] type={type(response).__name__} len={len(response) if response else 0}")
-                print(f"[main.handle_ui_input] repr (primeros 200): {repr(response[:200]) if response else repr(response)}")
-                print(f"[main.handle_ui_input] emitting text_updated …")
                 ui_signals.text_updated.emit(response)
                 ui_signals.mood_updated.emit(iris.personality.state.mood.value)
                 if tts_enabled[0]:
@@ -143,6 +193,7 @@ def main():
     ui_signals.user_text_submitted.connect(handle_ui_input)
 
     tts_enabled = [True]
+    claude_delegation = [True]
 
     def on_voice_mode_changed(enabled: bool):
         tts_enabled[0] = enabled
@@ -150,7 +201,13 @@ def main():
         mode_label = "Voz" if enabled else "Solo texto"
         print(f"[Iris] Modo cambiado: {mode_label}")
 
+    def on_claude_delegation_changed(enabled: bool):
+        claude_delegation[0] = enabled
+        label = "activado" if enabled else "desactivado"
+        print(f"[Iris] Consultar Claude: {label}")
+
     ui_signals.voice_mode_changed.connect(on_voice_mode_changed)
+    ui_signals.claude_delegation_enabled.connect(on_claude_delegation_changed)
 
     def terminal_loop():
         while True:
@@ -165,12 +222,15 @@ def main():
                 print("\nIris: ", end="", flush=True)
                 ui_signals.mood_updated.emit(iris.personality.state.mood.value)
 
-                def _on_delegating():
-                    print("[delegando a Claude Code...]")
-                    ui_signals.claude_thinking_changed.emit(True)
+                if claude_delegation[0]:
+                    def _on_delegating():
+                        print("[delegando a Claude Code...]")
+                        ui_signals.claude_thinking_changed.emit(True)
 
-                response = iris.delegate_to_claude(user_input, on_delegating=_on_delegating)
-                ui_signals.claude_thinking_changed.emit(False)
+                    response = iris.delegate_to_claude(user_input, on_delegating=_on_delegating)
+                    ui_signals.claude_thinking_changed.emit(False)
+                else:
+                    response = iris.chat(user_input)
                 print(response)
 
                 ui_signals.text_updated.emit(response)
@@ -195,6 +255,7 @@ def _handle_command(cmd: str, iris) -> str:
             s = iris.get_status()
             out.append(f"Mood: {s['mood']}")
             out.append(f"Trust: {s['trust_level']:.1f}/100 ({s['trust_stage']})")
+            out.append(f"Energy: {s['energy']:.0f}/100 ({iris.personality.get_energy_stage()})")
             out.append(f"User: {s['owner_address']}")
             out.append(f"DB Msgs: {s['total_messages']}")
             out.append(f"Voz: {s['voice_active']}")
@@ -225,6 +286,7 @@ def _handle_command(cmd: str, iris) -> str:
                 try:
                     amount = float(parts[1])
                     iris.personality.adjust_trust(amount, "ajuste manual")
+                    iris.personality.save_state()
                     out.append(f"Trust → {iris.personality.state.trust_level:.1f}")
                 except ValueError:
                     out.append("Error. Uso: /trust +10")

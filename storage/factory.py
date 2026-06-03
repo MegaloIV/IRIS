@@ -27,6 +27,10 @@ class _DummyGraphStorage(BaseGraphStorage):
     def get_owner_graph(self, owner_name, depth=1): return ""
     def save(self): pass
     def close(self): pass
+    # Helpers internos que el dummy no necesita implementar
+    def get_deep_context(self, entity_name, relation_types, depth=2): return []
+    def get_context_by_relation(self, entity_name, relation_types): return []
+    def search_entities(self, search_term): return []
 
 
 class StorageFactory:
@@ -92,8 +96,9 @@ class StorageFactory:
         logging.info("[Storage] Graph storage desactivado (modo local).")
 
     def close(self):
-        try:
-            if hasattr(self.graph, "close"):
-                self.graph.close()
-        except Exception:
-            pass
+        for backend in (self.graph, self.vector, self.history, self.state):
+            try:
+                if hasattr(backend, "close"):
+                    backend.close()
+            except Exception:
+                pass

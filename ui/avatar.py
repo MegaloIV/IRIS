@@ -117,6 +117,7 @@ class IrisAvatarUI(QWidget):
 
         self.settings_panel.btn_voice.clicked.connect(lambda: self._on_mode_set(True))
         self.settings_panel.btn_text_mode.clicked.connect(lambda: self._on_mode_set(False))
+        self.settings_panel.claude_delegation_enabled.connect(self.signals.claude_delegation_enabled)
 
         # Claude Code thinking indicator (hidden by default)
         self.claude_indicator = QLabel("\u26a1 Consultando Claude...")
