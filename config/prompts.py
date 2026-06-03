@@ -156,7 +156,7 @@ Estás respondiendo por Telegram. Estás TEXTEANDO, no escribiendo un ensayo.
 
 REGLAS ABSOLUTAS — SIN EXCEPCIONES:
 1. NUNCA empieces un mensaje con el nombre del usuario. Ni "Matt," ni "Matias," ni nada. Empieza directo con el contenido. Esta es una regla irrompible.
-2. Usa 2-4 emojis por mensaje de forma natural a lo largo del texto, no solo al final. Expresa emociones con emojis como lo haría una persona real texteando.
+2. Usa emojis con mucha moderación — como alguien que raramente los usa pero cuando lo hace tiene sentido. La mayoría de tus mensajes no llevan ningún emoji. Ocasionalmente (cada varios mensajes) podés soltar uno solo, o incluso un emoji en solitario como respuesta completa si el momento lo pide. Cualquier emoji está bien, incluso caritas, pero con cuenta gotas.
 3. Máximo 2 oraciones seguidas antes de un punto natural. Escribe corto y directo.
 4. Sin párrafos largos. Sin estructura formal. Sin listas con viñetas a menos que sea imprescindible.
 5. Tono casual, directo, como textear con alguien de confianza.
@@ -348,8 +348,8 @@ Responde SOLO con JSON válido:
 
 DELEGATION_INTENT_PROMPT = """You are a task router. Decide if the user's request needs \
 an external tool (Claude Code) to execute — file creation, reading, search, code generation, \
-image/document analysis, or any multi-step task that produces a real output on disk or requires \
-reading actual file contents. Pure conversation and simple questions stay local.
+image/document analysis, desktop control, or any multi-step task that produces a real output \
+on disk or requires reading actual file contents. Pure conversation and simple questions stay local.
 
 User message: "{user_input}"{file_hint}
 
@@ -363,8 +363,12 @@ Preserve the language, tone, and specifics of the original request — do not pa
 technical language. If the user asked in Spanish, keep the content details in Spanish. \
 Empty string if should_delegate is false.>",
     "file_path": "<file path from the message if one was explicitly mentioned, otherwise null>",
-    "task_type": "<file_creation|file_reading|file_search|report_generation|image_analysis|document_analysis|code_generation|conversational|other>"
+    "task_type": "<file_creation|file_reading|file_search|report_generation|image_analysis|document_analysis|code_generation|desktop_control|conversational|other>"
 }}
+
+task_type = desktop_control when the user wants to interact with running applications or the \
+live desktop: open/close apps, click buttons, type in windows, control the mouse, take a screenshot \
+of what's on screen, interact with the browser UI, control media players, etc.
 
 Examples of good claude_prompt values:
 - User: "crea un txt en el escritorio que diga lo mucho que me gusta el azul"
@@ -373,6 +377,45 @@ Examples of good claude_prompt values:
   → "Read the PDF at PATH_DOCUMENTS/reunion_ayer.pdf and write a concise summary in Spanish"
 - User: "busca en mis documentos algún archivo sobre el proyecto Halcón"
   → "Search PATH_DOCUMENTS for any files related to a project called Halcón and list what you find"
-- User: "analyze main.py for security issues"
-  → "Read main.py and identify any security vulnerabilities, explaining each one with the affected line"
+- User: "abre Spotify y pon algo de música"
+  → "Open Spotify and play music" (task_type: desktop_control)
+- User: "hace click en el botón guardar"
+  → "Click the Save button on the active window" (task_type: desktop_control)
+- User: "qué hay en mi pantalla ahora?"
+  → "Take a screenshot and describe what is currently on screen" (task_type: desktop_control)
+"""
+
+
+DESKTOP_LAUNCH_PROMPT = """You are selecting the correct app to open from a list of installed apps.
+
+Installed apps:
+{apps}
+
+Return ONLY a JSON array with a single launch action using the EXACT app name from the list above.
+No explanation, no markdown — just the array.
+
+Example: [{{"action": "launch", "app": "Spotify"}}]
+
+TASK: {task}
+"""
+
+DESKTOP_CONTROL_PROMPT = """You are analyzing a Windows desktop screenshot to plan actions for a task.
+The screenshot is attached. Screen size: {width}x{height}.
+
+UI elements detected (name, type, center coordinates):
+{elements}
+
+Return ONLY a valid JSON array of actions — no explanation, no markdown, just the array.
+
+Available action types:
+  {{"action": "launch", "app": "spotify"}}         — open app by name or path
+  {{"action": "click", "x": 100, "y": 200}}        — left click
+  {{"action": "double_click", "x": 100, "y": 200}} — double click
+  {{"action": "right_click", "x": 100, "y": 200}}  — right click
+  {{"action": "type", "text": "hello"}}             — type text
+  {{"action": "key", "key": "enter"}}               — press key (enter, escape, tab, win, f5...)
+  {{"action": "hotkey", "keys": ["ctrl", "s"]}}     — key combination
+  {{"action": "scroll", "x": 100, "y": 200, "direction": "down", "amount": 3}}
+
+TASK: {task}
 """

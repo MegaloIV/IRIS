@@ -17,6 +17,8 @@ from config.settings import settings
 from storage.base import BaseGraphStorage
 
 logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
+logging.getLogger("neo4j.io").setLevel(logging.CRITICAL)
+logging.getLogger("neo4j.pool").setLevel(logging.CRITICAL)
 
 
 class Neo4jGraphStorage(BaseGraphStorage):
@@ -25,7 +27,9 @@ class Neo4jGraphStorage(BaseGraphStorage):
         self.driver = GraphDatabase.driver(
             settings.storage.neo4j_uri,
             auth=(settings.storage.neo4j_user, settings.storage.neo4j_password),
-            max_connection_lifetime=30 * 60,
+            max_connection_lifetime=3 * 60,  # 3 min — menor que el idle timeout de AuraDB
+            max_connection_pool_size=5,
+            connection_acquisition_timeout=10,
             keep_alive=True,
         )
         self._init_constraints()

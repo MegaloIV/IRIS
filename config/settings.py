@@ -81,6 +81,12 @@ class ClaudeConfig(BaseModel):
     bin_path: str = os.getenv("CLAUDE_BIN_PATH", "/home/matias/.npm-global/bin/claude")
 
 
+class CompanionConfig(BaseModel):
+    enabled: bool = os.getenv("COMPANION_ENABLED", "false").lower() == "true"
+    url: str = os.getenv("COMPANION_URL", "http://localhost:7891")
+    startup_timeout: int = int(os.getenv("COMPANION_STARTUP_TIMEOUT", "8"))
+
+
 class ServerConfig(BaseModel):
     host: str = os.getenv("SERVER_HOST", "0.0.0.0")
     port: int = int(os.getenv("SERVER_PORT", "8000"))
@@ -106,6 +112,7 @@ class Settings(BaseModel):
     storage: StorageConfig = StorageConfig()
     voice: VoiceConfig = VoiceConfig()
     claude: ClaudeConfig = ClaudeConfig()
+    companion: CompanionConfig = CompanionConfig()
     server: ServerConfig = ServerConfig()
     telegram: TelegramConfig = TelegramConfig()
 

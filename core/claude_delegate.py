@@ -13,14 +13,12 @@ import os
 import re
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
 
 # ─── Pre-filtro heurístico ────────────────────────────────────────────────────
-# Evita llamar al IntentAgent (LLM) para mensajes claramente conversacionales.
-# Coincide con señales explícitas de delegación: verbos de acción, extensiones
-# de archivo, términos técnicos. Si no hay ninguna señal → va directo a chat().
 
 _DELEGATION_PATTERNS = [
     re.compile(
@@ -38,6 +36,14 @@ _DELEGATION_PATTERNS = [
         re.I,
     ),
     re.compile(r'\bPATH_\w+', re.I),
+    # desktop control
+    re.compile(
+        r'\b(clicke?a?r?|hace?r? click|mouse|pantalla|ventana|aplicaci[oó]n|'
+        r'spotify|chrome|firefox|navegador|notepad|calculadora|abre? el|'
+        r'cierra? el|minimiza?|maximiza?|escrib[eí] en|tecla|atajo|'
+        r'captura de pantalla|screenshot|que hay en (la )?pantalla)\b',
+        re.I,
+    ),
 ]
 
 
@@ -81,6 +87,138 @@ _TASK_LABELS: dict[str, str] = {
     "code_generation":    "El código que escribí",
     "other":              "Lo que procesé",
 }
+
+
+# ─── Companion desktop ───────────────────────────────────────────────────────
+
+_COMPANION_BAT_WSL = Path(__file__).parent.parent / "companion" / "start.bat"
+
+
+def _wsl_to_windows_path(path: str) -> str:
+    p = str(path)
+    if p.startswith("/mnt/"):
+        parts = p[5:].split("/", 1)
+        drive = parts[0].upper()
+        rest  = parts[1].replace("/", "\\") if len(parts) > 1 else ""
+        return f"{drive}:\\{rest}"
+    return p
+
+
+def _get_windows_host_ip() -> str:
+    """Devuelve la IP del host Windows vista desde WSL2."""
+    # Método 1: ip route (parseo en Python, sin depender de awk)
+    try:
+        result = subprocess.run(
+            ["ip", "route", "show", "default"],
+            capture_output=True, text=True, timeout=3,
+        )
+        for line in result.stdout.splitlines():
+            if "default via" in line:
+                parts = line.split()
+                return parts[parts.index("via") + 1]
+    except Exception:
+        pass
+    # Método 2: resolv.conf
+    try:
+        with open("/etc/resolv.conf") as f:
+            for line in f:
+                if line.startswith("nameserver"):
+                    return line.split()[1]
+    except Exception:
+        pass
+    return "localhost"
+
+
+def get_claude_companion_url(companion_url: str) -> str:
+    """
+    Transforma la URL del companion para que sea alcanzable desde el entorno
+    bash de Claude Code, que no tiene acceso al relay localhost→Windows de WSL2.
+    """
+    import re
+    if re.search(r'localhost|127\.0\.0\.1', companion_url):
+        port = companion_url.rsplit(":", 1)[-1].strip("/")
+        return f"http://{_get_windows_host_ip()}:{port}"
+    return companion_url
+
+
+def take_desktop_snapshot(companion_url: str) -> dict:
+    """Toma screenshot + elementos UI. Retorna el dict del companion."""
+    import requests as _req
+    resp = _req.get(f"{companion_url}/screenshot", timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def execute_desktop_actions(actions: list[dict], companion_url: str) -> str:
+    """Ejecuta la lista de acciones devuelta por Claude Code vía el companion."""
+    import requests as _req
+    import time
+    done = []
+    for act in actions:
+        atype = act.get("action", "")
+        try:
+            if atype == "launch":
+                _req.post(f"{companion_url}/launch", json={"app": act["app"]}, timeout=5)
+                done.append(f"Abrí {act['app']}")
+                time.sleep(1.5)
+            elif atype == "click":
+                _req.post(f"{companion_url}/click", json={"x": act["x"], "y": act["y"], "button": act.get("button", "left")}, timeout=5)
+                done.append(f"Click en ({act['x']}, {act['y']})")
+            elif atype == "double_click":
+                _req.post(f"{companion_url}/double_click", json={"x": act["x"], "y": act["y"]}, timeout=5)
+                done.append(f"Doble click en ({act['x']}, {act['y']})")
+            elif atype == "right_click":
+                _req.post(f"{companion_url}/right_click", json={"x": act["x"], "y": act["y"]}, timeout=5)
+                done.append(f"Click derecho en ({act['x']}, {act['y']})")
+            elif atype == "type":
+                _req.post(f"{companion_url}/type", json={"text": act["text"]}, timeout=5)
+                done.append(f"Escribí: {act['text']}")
+            elif atype == "key":
+                _req.post(f"{companion_url}/key", json={"key": act["key"]}, timeout=5)
+                done.append(f"Tecla: {act['key']}")
+            elif atype == "hotkey":
+                _req.post(f"{companion_url}/hotkey", json={"keys": act["keys"]}, timeout=5)
+                done.append(f"Atajo: {'+'.join(act['keys'])}")
+            elif atype == "scroll":
+                _req.post(f"{companion_url}/scroll", json={"x": act["x"], "y": act["y"], "direction": act.get("direction", "down"), "amount": act.get("amount", 3)}, timeout=5)
+                done.append(f"Scroll {act.get('direction', 'down')}")
+        except Exception as e:
+            done.append(f"Error en {atype}: {e}")
+    return "\n".join(done) if done else "Sin acciones ejecutadas"
+
+
+def ensure_companion_alive(companion_url: str, timeout: int = 8) -> bool:
+    """Verifica que el companion esté corriendo; si no, lo lanza y espera."""
+    import requests as _req
+    try:
+        _req.get(f"{companion_url}/health", timeout=2)
+        return True
+    except Exception:
+        pass
+
+    bat_win = _wsl_to_windows_path(_COMPANION_BAT_WSL)
+    print(f"[Companion] No está corriendo — iniciando {bat_win}...")
+    try:
+        # start "" abre el bat en su propia ventana (necesario para el servidor)
+        subprocess.Popen(
+            ["cmd.exe", "/c", "start", "", bat_win],
+            close_fds=True,
+        )
+    except Exception as e:
+        print(f"[Companion] Error al iniciar: {e}")
+        return False
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            _req.get(f"{companion_url}/health", timeout=1)
+            print("[Companion] Listo.")
+            return True
+        except Exception:
+            time.sleep(0.5)
+
+    print("[Companion] Timeout esperando al companion.")
+    return False
 
 
 # ─── Intent Agent ─────────────────────────────────────────────────────────────
@@ -209,7 +347,7 @@ FILE_TASK_TYPES = [
 ]
 
 
-def _build_prompt(user_input: str, intent: dict, iris_context: dict | None = None) -> str:
+def _build_prompt(user_input: str, intent: dict, iris_context: dict | None = None, companion_url: str = "") -> str:
     """
     Construye el prompt final para Claude Code.
 
@@ -249,6 +387,14 @@ def _build_prompt(user_input: str, intent: dict, iris_context: dict | None = Non
                 f"\n\nNOTE: The path variable(s) {', '.join(missing)} are referenced but not defined. "
                 "Use the current working directory or clearly state that the path is unknown."
             )
+
+    # Prompt de control de escritorio
+    if intent.get("task_type") == "desktop_control" and companion_url:
+        from config.prompts import DESKTOP_CONTROL_PROMPT
+        prompt = DESKTOP_CONTROL_PROMPT.format(
+            companion_url=companion_url,
+            task=intent["claude_prompt"],
+        )
 
     return prompt
 

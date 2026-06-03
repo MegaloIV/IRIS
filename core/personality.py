@@ -44,7 +44,7 @@ class TrustStage(str, Enum):
 class EmotionalState:
     mood: Mood = Mood.NEUTRAL
     trust_level: float = 10.0
-    energy: float = 80.0
+    energy: float = 100.0
     irritation_count: int = 0
     last_interaction: Optional[str] = None
     inside_jokes: list = field(default_factory=list)
@@ -70,7 +70,7 @@ class EmotionalState:
         obj = cls()
         obj.mood                 = Mood(data.get("mood", "neutral"))
         obj.trust_level          = data.get("trust_level", 10.0)
-        obj.energy               = data.get("energy", 80.0)
+        obj.energy               = data.get("energy", 100.0)
         obj.irritation_count     = data.get("irritation_count", 0)
         obj.last_interaction     = data.get("last_interaction")
         obj.inside_jokes         = data.get("inside_jokes", [])
@@ -151,8 +151,8 @@ class PersonalityEngine:
     def record_interaction(self):
         self.state.last_interaction = datetime.now().isoformat()
         self.adjust_trust(2.0, "interacción normal")
-        self.state.energy = max(0.0, self.state.energy - 3.0)
-        logging.debug(f"[Energy] −3 → {self.state.energy:.1f}")
+        self.state.energy = max(0.0, self.state.energy - 1.0)
+        logging.debug(f"[Energy] −1 → {self.state.energy:.1f}")
 
     def on_positive_moment(self):
         self.adjust_trust(5.0, "momento positivo")
@@ -256,6 +256,9 @@ class PersonalityEngine:
         address = self.get_owner_address()
         name    = self.owner_name or "el usuario"
 
+        now        = datetime.now()
+        time_block = f"\nFecha y hora actual: {now.strftime('%A %d de %B de %Y, %H:%M')}."
+
         base         = BASE_PERSONALITY.format(owner_name=name, address=address)
         trust_block  = TRUST_STAGES[stage.value].format(trust=trust, address=address)
         mood_block   = MOOD_MODIFIERS[mood.value]
@@ -266,7 +269,7 @@ class PersonalityEngine:
             jokes_str   = ", ".join(f'"{j}"' for j in self.state.inside_jokes[-5:])
             jokes_block = f"\nCHISTES INTERNOS: {jokes_str}. Referencialos naturalmente si viene al caso."
 
-        return base + "\n" + trust_block + mood_block + energy_block + jokes_block + FEW_SHOT_EXAMPLES + RULES
+        return base + time_block + "\n" + trust_block + mood_block + energy_block + jokes_block + FEW_SHOT_EXAMPLES + RULES
 
     def get_status_summary(self) -> str:
         stage = self.get_trust_stage()

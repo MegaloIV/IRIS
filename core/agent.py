@@ -8,6 +8,8 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, Annotated, Optional, Callable
 import operator
+import re
+from pathlib import Path
 
 from config.settings import settings
 from core.personality import PersonalityEngine
@@ -17,6 +19,28 @@ from storage.factory import StorageFactory
 from core.utils.history import ConversationHistory
 from core.utils.context import build_messages
 from core.utils.streaming import stream_sentences
+
+
+_CAPABILITY_RE = re.compile(
+    r'\b(puedes|capaz|habilidades?|capacidades?|funciones?|qué sabes|qué puedes|'
+    r'sabes hacer|te gustaría|quisieras|puedo pedirte|sirves para|para qué sirves|'
+    r'abilities|capabilities|can you)\b',
+    re.IGNORECASE,
+)
+_CAPABILITIES_PATH = Path(__file__).parent.parent / "config" / "capabilities.md"
+
+
+def _capabilities_context() -> str:
+    """Load capabilities.md and wrap it for injection into the system prompt."""
+    try:
+        content = _CAPABILITIES_PATH.read_text(encoding="utf-8")
+        return "[TUS CAPACIDADES — úsalas solo si el usuario pregunta qué puedes hacer o hablan de tus habilidades]:\n" + content
+    except Exception:
+        return ""
+
+
+def _is_capability_question(text: str) -> bool:
+    return bool(_CAPABILITY_RE.search(text))
 
 
 class IrisState(TypedDict):
@@ -84,6 +108,10 @@ class IrisAgent:
     def _retrieve_memory_node(self, state: IrisState) -> dict:
         text           = state["messages"][-1].content
         memory_context = self.memory.get_relevant_memories(text)
+        if _is_capability_question(text):
+            caps = _capabilities_context()
+            if caps:
+                memory_context = (memory_context + "\n\n" + caps).strip() if memory_context else caps
         return {
             "messages":         [],
             "current_mood":     state["current_mood"],
@@ -96,7 +124,7 @@ class IrisAgent:
     def _generate_response_node(self, state: IrisState) -> dict:
         system_prompt = state["system_prompt"]
         if state["interface_context"]:
-            system_prompt = state["interface_context"] + "\n\n" + system_prompt
+            system_prompt = system_prompt + "\n\n" + state["interface_context"]
         msgs     = build_messages(system_prompt, state["memory_context"], self.history.get_window(), state["messages"][-1])
         response = self.llm.invoke(msgs)
         return {
@@ -178,6 +206,83 @@ class IrisAgent:
         if self._voice:
             self._voice.speak(text)
 
+    # ─── Control de escritorio ────────────────────────────────────────────────
+
+    _UI_INTERACTION_RE = re.compile(
+        r'\b(click|clic|escrib|type|scroll|seleccion|arrastr|drag|men[uú]|bot[oó]n|button|'
+        r'busca en|ingres|rellen|campo|input|formulari)\b',
+        re.I,
+    )
+
+    def _handle_desktop_control(self, user_input: str, intent: dict, companion_url: str, interface_context: str) -> str:
+        import json, re, base64, requests as _req
+        from core.claude_delegate import ClaudeDelegator, take_desktop_snapshot, execute_desktop_actions
+        from config.prompts import DESKTOP_LAUNCH_PROMPT, DESKTOP_CONTROL_PROMPT
+        from langchain_core.messages import SystemMessage, HumanMessage
+
+        task = intent["claude_prompt"]
+        needs_ui = bool(self._UI_INTERACTION_RE.search(task))
+
+        # ── Flujo simple: solo lista de apps, sin screenshot ──────────────────
+        if not needs_ui:
+            try:
+                apps = _req.get(f"{companion_url}/apps", timeout=5).json().get("apps", [])
+            except Exception:
+                apps = []
+            apps_text = "\n".join(f"  - {a}" for a in apps) or "  (lista no disponible)"
+            prompt = DESKTOP_LAUNCH_PROMPT.format(apps=apps_text, task=task)
+            raw = ClaudeDelegator().run_sync(prompt)
+
+        # ── Flujo completo: screenshot + elementos + coords ───────────────────
+        else:
+            try:
+                snap = take_desktop_snapshot(companion_url)
+            except Exception as e:
+                return self.chat(f"[No pude tomar screenshot: {e}. Díselo.] {user_input}", interface_context=interface_context)
+
+            elements_text = "\n".join(
+                f"  - {el['name']} ({el['type']}) @ ({el['x']}, {el['y']})"
+                for el in snap.get("elements", [])[:40]
+            ) or "  (ninguno detectado)"
+
+            prompt = DESKTOP_CONTROL_PROMPT.format(
+                width=snap.get("width", "?"), height=snap.get("height", "?"),
+                elements=elements_text, task=task,
+            )
+            try:
+                with open(snap.get("wsl_path", ""), "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode()
+                prompt += f"\n\n[Attached image: screenshot.png]\ndata:image/png;base64,{b64}"
+                raw = ClaudeDelegator().run_sync(prompt)
+            except Exception:
+                raw = ClaudeDelegator().run_sync(prompt, snap.get("wsl_path"))
+
+        print(f"[Desktop] Acciones recibidas: {raw[:200]}")
+
+        # Ejecutar acciones
+        try:
+            actions = json.loads(re.sub(r'```(?:json)?\s*', '', raw).strip())
+            result = execute_desktop_actions(actions, companion_url)
+        except Exception:
+            result = raw
+
+        # Iris narra en primera persona
+        self.personality.record_interaction()
+        self.personality.save_state()
+        self.history.append_turn(user_input, result)
+
+        system = self.personality.build_system_prompt()
+        if interface_context:
+            system = system + "\n\n" + interface_context
+        narration_prompt = (
+            f"Acabas de controlar el escritorio tú misma y realizaste estas acciones:\n{result}\n\n"
+            f"Dile al usuario lo que hiciste, en primera persona, con tu personalidad. "
+            f"Eres tú quien lo hizo — 'lo abrí', 'ya está', 'listo'. "
+            f"Sin mencionar JSON, herramientas ni sistemas externos."
+        )
+        msgs = [SystemMessage(content=system), *self.history.get_window(), HumanMessage(content=narration_prompt)]
+        return self.llm.invoke(msgs).content
+
     # ─── Delegación a Claude Code ─────────────────────────────────────────────
 
     def delegate_to_claude(self, user_input: str, file_path: str | None = None, on_delegating: Callable | None = None, interface_context: str = "") -> str:
@@ -197,6 +302,7 @@ class IrisAgent:
         from core.claude_delegate import (
             ClaudeDelegator, IntentAgent, _build_prompt,
             _IMAGE_EXTENSIONS, _quick_delegate_check, _is_claude_error, _TASK_LABELS,
+            ensure_companion_alive, take_desktop_snapshot, execute_desktop_actions,
         )
 
         # ── 1. Pre-filtro heurístico ──────────────────────────────────────────
@@ -208,6 +314,34 @@ class IrisAgent:
         if not intent["should_delegate"]:
             print("[IntentAgent] Delegación cancelada — respondiendo directamente")
             return self.chat(user_input, interface_context=interface_context)
+
+        # ── 2.5 Companion (desktop_control) ──────────────────────────────────
+        if intent.get("task_type") == "desktop_control":
+            if not settings.companion.enabled:
+                return self.chat(
+                    f"[El usuario pidió controlar el escritorio pero el companion está desactivado. "
+                    f"Díselo con tu estilo.] {user_input}",
+                    interface_context=interface_context,
+                )
+            alive = ensure_companion_alive(settings.companion.url, settings.companion.startup_timeout)
+            if not alive:
+                return self.chat(
+                    f"[El companion no respondió. Díselo con tu estilo.] {user_input}",
+                    interface_context=interface_context,
+                )
+            if on_delegating:
+                on_delegating()
+            try:
+                return self._handle_desktop_control(
+                    user_input, intent, settings.companion.url, interface_context
+                )
+            except Exception as e:
+                import logging
+                logging.error(f"[Desktop] Error no manejado: {e}")
+                return self.chat(
+                    f"[Hubo un error interno controlando el escritorio: {e}. Díselo brevemente.] {user_input}",
+                    interface_context=interface_context,
+                )
 
         if on_delegating:
             on_delegating()
@@ -232,7 +366,11 @@ class IrisAgent:
 
         base_prompt    = self.personality.build_system_prompt()
         memory_context = self.memory.get_relevant_memories(user_input)
-        system_content = (interface_context + "\n\n" + base_prompt) if interface_context else base_prompt
+        if _is_capability_question(user_input):
+            caps = _capabilities_context()
+            if caps:
+                memory_context = (memory_context + "\n\n" + caps).strip() if memory_context else caps
+        system_content = (base_prompt + "\n\n" + interface_context) if interface_context else base_prompt
         if memory_context:
             system_content += "\n\n" + memory_context
 
