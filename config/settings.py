@@ -22,16 +22,23 @@ class LLMConfig(BaseModel):
     provider: str = os.getenv("LLM_PROVIDER", "groq")
     model: str = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.85"))
-    api_key: Optional[str] = None
+    api_key: Optional[str] = None       # providers de clave única (anthropic, openai)
+    api_keys: list[str] = []            # rotación de claves (groq)
     analysis_model: str = os.getenv("LLM_ANALYSIS_MODEL", "llama-3.1-8b-instant")
 
     def model_post_init(self, __context):
-        keys = {
-            "groq":      "GROQ_API_KEY",
-            "anthropic": "ANTHROPIC_API_KEY",
-            "openai":    "OPENAI_API_KEY",
-        }
-        env_var = keys.get(self.provider)
+        # Groq: soporte multi-key con rotación automática
+        groq_keys_raw = os.getenv("GROQ_API_KEYS", "")
+        if groq_keys_raw:
+            self.api_keys = [k.strip() for k in groq_keys_raw.split(",") if k.strip()]
+        elif self.provider == "groq":
+            single = os.getenv("GROQ_API_KEY", "")
+            if single:
+                self.api_keys = [single]
+
+        # Providers de clave única
+        single_key_vars = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
+        env_var = single_key_vars.get(self.provider)
         if env_var:
             self.api_key = os.getenv(env_var)
 
@@ -70,6 +77,16 @@ class VoiceConfig(BaseModel):
     # Toggle — botón Copilot
     wake_word: str = os.getenv("WAKE_WORD", "f23")
 
+class ClaudeConfig(BaseModel):
+    bin_path: str = os.getenv("CLAUDE_BIN_PATH", "/home/matias/.npm-global/bin/claude")
+
+
+class CompanionConfig(BaseModel):
+    enabled: bool = os.getenv("COMPANION_ENABLED", "false").lower() == "true"
+    url: str = os.getenv("COMPANION_URL", "http://localhost:7891")
+    startup_timeout: int = int(os.getenv("COMPANION_STARTUP_TIMEOUT", "8"))
+
+
 class ServerConfig(BaseModel):
     host: str = os.getenv("SERVER_HOST", "0.0.0.0")
     port: int = int(os.getenv("SERVER_PORT", "8000"))
@@ -84,6 +101,7 @@ class TelegramConfig(BaseModel):
     owner_id: Optional[int] = int(_raw_owner_id) if _raw_owner_id.lstrip("-").isdigit() else None
     webhook_url: Optional[str] = os.getenv("TELEGRAM_WEBHOOK_URL")
     tts_enabled: bool = os.getenv("TELEGRAM_TTS_ENABLED", "false").lower() == "true"
+    stt_enabled: bool = os.getenv("TELEGRAM_STT_ENABLED", "false").lower() == "true"
 
 
 class Settings(BaseModel):
@@ -93,6 +111,8 @@ class Settings(BaseModel):
     memory: MemoryConfig = MemoryConfig()
     storage: StorageConfig = StorageConfig()
     voice: VoiceConfig = VoiceConfig()
+    claude: ClaudeConfig = ClaudeConfig()
+    companion: CompanionConfig = CompanionConfig()
     server: ServerConfig = ServerConfig()
     telegram: TelegramConfig = TelegramConfig()
 

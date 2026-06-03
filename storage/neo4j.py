@@ -1,19 +1,25 @@
 """
 storage/neo4j.py
-Implementación de grafo de conocimiento usando Neo4j AuraDB.
-(Actualizado con auto-reconexión y silenciador de warnings)
+Grafo de conocimiento Neo4j AuraDB.
+
+Mejoras respecto a la versión anterior:
+- add_relation almacena context y date en la relación (bug corregido)
+- Evolución: el contexto anterior se acumula en r.history antes de sobrescribir
+- Traversal a profundidad 2: entidades vecinas enriquecen el contexto
+- get_relevant_context devuelve relaciones con contexto psicológico completo
 """
 
 import logging
-from typing import Optional
 
 from neo4j import GraphDatabase
 
 from config.settings import settings
 from storage.base import BaseGraphStorage
 
-# Silenciar el spam de advertencias de Neo4j cuando una relación no existe en el grafo
 logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
+logging.getLogger("neo4j.io").setLevel(logging.CRITICAL)
+logging.getLogger("neo4j.pool").setLevel(logging.CRITICAL)
+
 
 class Neo4jGraphStorage(BaseGraphStorage):
 
@@ -21,21 +27,22 @@ class Neo4jGraphStorage(BaseGraphStorage):
         self.driver = GraphDatabase.driver(
             settings.storage.neo4j_uri,
             auth=(settings.storage.neo4j_user, settings.storage.neo4j_password),
-            # Ajustes recomendados para mantener conexiones en AuraDB
-            max_connection_lifetime=30 * 60,
-            keep_alive=True
+            max_connection_lifetime=3 * 60,  # 3 min — menor que el idle timeout de AuraDB
+            max_connection_pool_size=5,
+            connection_acquisition_timeout=10,
+            keep_alive=True,
         )
         self._init_constraints()
         logging.info("[Neo4j] Conectado a AuraDB.")
 
     def _init_constraints(self):
-        def _create_constraint(tx):
+        def _tx(tx):
             tx.run(
                 "CREATE CONSTRAINT entity_name IF NOT EXISTS "
                 "FOR (e:Entity) REQUIRE e.name IS UNIQUE"
             )
         with self.driver.session() as session:
-            session.execute_write(_create_constraint)
+            session.execute_write(_tx)
 
     def close(self):
         self.driver.close()
@@ -43,7 +50,7 @@ class Neo4jGraphStorage(BaseGraphStorage):
     # ─── Escritura ────────────────────────────────────────────────────────────
 
     def add_entity(self, name: str, entity_type: str, properties: dict) -> None:
-        def _add_entity_tx(tx):
+        def _tx(tx):
             tx.run(
                 """
                 MERGE (e:Entity {name: $name})
@@ -53,84 +60,146 @@ class Neo4jGraphStorage(BaseGraphStorage):
                 name=name, type=entity_type, properties=properties,
             )
         with self.driver.session() as session:
-            session.execute_write(_add_entity_tx)
+            session.execute_write(_tx)
 
     def add_relation(self, from_name: str, relation: str, to_name: str, properties: dict = None) -> None:
-        def _add_relation_tx(tx):
+        """
+        Crea o actualiza una relación tipada entre dos entidades.
+        - Las propiedades 'context' y 'date' se almacenan en la relación.
+        - Si ya existía con un contexto diferente, el contexto anterior se
+          acumula en r.history antes de sobrescribir (evolución de la relación).
+        """
+        props   = properties or {}
+        context = props.get("context", "")
+        date    = props.get("date", "")
+
+        def _tx(tx):
             tx.run(
                 f"""
                 MERGE (a:Entity {{name: $from_name}})
                 MERGE (b:Entity {{name: $to_name}})
                 MERGE (a)-[r:{relation}]->(b)
-                SET r.created_at = datetime()
+                ON CREATE SET
+                    r.context    = $context,
+                    r.date       = $date,
+                    r.created_at = datetime(),
+                    r.history    = []
+                ON MATCH SET
+                    r.history    = coalesce(r.history, []) +
+                        CASE
+                            WHEN r.context IS NOT NULL
+                             AND r.context <> ''
+                             AND r.context <> $context
+                            THEN [r.context + ' (' + coalesce(r.date, '?') + ')']
+                            ELSE []
+                        END,
+                    r.context    = CASE WHEN $context <> '' THEN $context ELSE coalesce(r.context, '') END,
+                    r.date       = CASE WHEN $date   <> '' THEN $date   ELSE coalesce(r.date,    '') END,
+                    r.updated_at = datetime()
                 """,
-                from_name=from_name, to_name=to_name,
+                from_name=from_name, to_name=to_name, context=context, date=date,
             )
         with self.driver.session() as session:
-            session.execute_write(_add_relation_tx)
+            session.execute_write(_tx)
 
     # ─── Consultas ────────────────────────────────────────────────────────────
 
     def get_context(self, entity_name: str, depth: int = 2) -> list[dict]:
-        def _get_context_tx(tx):
+        """Relaciones directas de una entidad hasta `depth` saltos."""
+        def _tx(tx):
             result = tx.run(
                 f"""
                 MATCH path = (e:Entity {{name: $name}})-[*1..{depth}]-(related)
+                WITH e, relationships(path)[0] AS r, related
                 RETURN
-                    e.name AS source,
-                    type(relationships(path)[0]) AS relation,
+                    e.name       AS source,
+                    type(r)      AS relation,
                     related.name AS target,
-                    related.type AS target_type
+                    related.type AS target_type,
+                    r.context    AS rel_context,
+                    r.date       AS rel_date,
+                    r.history    AS rel_history
+                LIMIT 60
+                """,
+                name=entity_name,
+            )
+            return [dict(row) for row in result]
+        with self.driver.session() as session:
+            return session.execute_read(_tx)
+
+    def get_deep_context(self, entity_name: str, relation_types: list[str], depth: int = 2) -> list[dict]:
+        """
+        Traversal a profundidad `depth`.
+        Devuelve la cadena completa de relaciones para cada camino, no solo el
+        primer salto. Para un mismo target alcanzado por dos caminos, se
+        devuelven ambos (el más corto primero).
+        """
+        type_clause = f":{('|'.join(relation_types))}" if relation_types else ""
+
+        def _tx(tx):
+            result = tx.run(
+                f"""
+                MATCH path = (e:Entity {{name: $name}})-[{type_clause}*1..{depth}]-(related)
+                WITH e, relationships(path) AS rels, related, length(path) AS hops
+                RETURN
+                    e.name                  AS source,
+                    [r IN rels | type(r)]   AS relation_chain,
+                    related.name            AS target,
+                    related.type            AS target_type,
+                    rels[-1].context        AS rel_context,
+                    rels[-1].date           AS rel_date,
+                    rels[-1].history        AS rel_history,
+                    hops
+                ORDER BY hops ASC, rel_date DESC
                 LIMIT 50
                 """,
                 name=entity_name,
             )
-            return [dict(r) for r in result]
-            
+            return [dict(row) for row in result]
         with self.driver.session() as session:
-            return session.execute_read(_get_context_tx)
+            return session.execute_read(_tx)
 
     def get_context_by_relation(self, entity_name: str, relation_types: list[str]) -> list[dict]:
+        """Profundidad 1 filtrada por tipos de relación."""
         if not relation_types:
             return self.get_context(entity_name, depth=1)
-
         relation_filter = "|".join(relation_types)
-        
-        def _get_ctx_rel_tx(tx):
+
+        def _tx(tx):
             result = tx.run(
                 f"""
                 MATCH (e:Entity {{name: $name}})-[r:{relation_filter}]-(related)
                 RETURN
-                    e.name AS source,
-                    type(r) AS relation,
+                    e.name       AS source,
+                    type(r)      AS relation,
                     related.name AS target,
                     related.type AS target_type,
-                    r.context AS rel_context,
-                    r.date AS rel_date
+                    r.context    AS rel_context,
+                    r.date       AS rel_date,
+                    r.history    AS rel_history
                 LIMIT 30
                 """,
                 name=entity_name,
             )
-            return [dict(r) for r in result]
-            
+            return [dict(row) for row in result]
         with self.driver.session() as session:
-            return session.execute_read(_get_ctx_rel_tx)
+            return session.execute_read(_tx)
 
     def search_entities(self, search_term: str) -> list[dict]:
-        def _search_entities_tx(tx):
+        """Búsqueda fuzzy de entidades por nombre (substring, case-insensitive)."""
+        def _tx(tx):
             result = tx.run(
                 """
                 MATCH (e:Entity)
-                WHERE toLower(e.name) CONTAINS toLower($search_term)
+                WHERE toLower(e.name) CONTAINS toLower($term)
                 RETURN e.name AS name, e.type AS type
                 LIMIT 10
                 """,
-                search_term=search_term,
+                term=search_term,
             )
-            return [dict(r) for r in result]
-            
+            return [dict(row) for row in result]
         with self.driver.session() as session:
-            return session.execute_read(_search_entities_tx)
+            return session.execute_read(_tx)
 
     def get_relevant_context(
         self,
@@ -138,39 +207,57 @@ class Neo4jGraphStorage(BaseGraphStorage):
         relation_types: list[str],
         owner_name: str,
     ) -> str:
+        """
+        Recupera el contexto de grafo más relevante para el mensaje actual.
+
+        Para cada entidad mencionada:
+        1. Busca relaciones directas e indirectas (depth 2).
+        2. Si no encuentra nada, intenta búsqueda fuzzy y reintenta.
+        3. Formatea con cadena de relaciones, contexto psicológico, fecha
+           e historial de evolución de la relación.
+        """
         if not entities and not relation_types:
             return ""
 
-        results = []
+        seen: set[str] = set()
+        all_rows: list[dict] = []
 
         for entity in entities:
-            rows = self.get_context_by_relation(entity, relation_types)
+            rows = self.get_deep_context(entity, relation_types, depth=2)
             if not rows:
                 matches = self.search_entities(entity)
                 for match in matches:
-                    rows += self.get_context_by_relation(match["name"], relation_types)
-            results.extend(rows)
+                    rows += self.get_deep_context(match["name"], relation_types, depth=2)
+            all_rows.extend(rows)
 
-        if not results and relation_types:
-            results = self.get_context_by_relation(owner_name, relation_types)
+        if not all_rows:
+            all_rows = self.get_deep_context(owner_name, relation_types, depth=1)
 
-        if not results:
+        if not all_rows:
             return ""
 
-        seen  = set()
-        lines = []
-        for row in results:
-            key = f"{row['source']}-{row['relation']}-{row['target']}"
-            if key not in seen:
-                seen.add(key)
-                
-                # Construir metadatos si existen
-                meta = []
-                if row.get('rel_date'): meta.append(f"Fecha: {row['rel_date']}")
-                if row.get('rel_context'): meta.append(f"Detalle: {row['rel_context']}")
-                
-                meta_str = f" ({' | '.join(meta)})" if meta else ""
-                lines.append(f"- {row['source']} {row['relation']} {row['target']}{meta_str}")
+        lines: list[str] = []
+        for row in all_rows:
+            chain        = row.get("relation_chain") or []
+            relation_str = " → ".join(chain) if chain else row.get("relation", "?")
+            key          = f"{row['source']}-{relation_str}-{row['target']}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            meta: list[str] = []
+            if row.get("rel_date"):
+                meta.append(row["rel_date"])
+            if row.get("rel_context"):
+                meta.append(row["rel_context"])
+            history = row.get("rel_history")
+            if isinstance(history, list) and history:
+                meta.append(f"antes: {history[-1]}")
+
+            hops     = row.get("hops", 1)
+            prefix   = "  └" if hops and hops > 1 else "-"
+            meta_str = f" [{' | '.join(meta)}]" if meta else ""
+            lines.append(f"{prefix} {row['source']} {relation_str} {row['target']}{meta_str}")
 
         return "\n".join(lines)
 
@@ -178,15 +265,15 @@ class Neo4jGraphStorage(BaseGraphStorage):
         context = self.get_context(owner_name, depth)
         if not context:
             return ""
-
-        seen  = set()
-        lines = []
+        seen: set[str] = set()
+        lines: list[str] = []
         for row in context:
             key = f"{row['source']}-{row['relation']}-{row['target']}"
-            if key not in seen:
-                seen.add(key)
-                lines.append(f"- {row['source']} {row['relation']} {row['target']}")
-
+            if key in seen:
+                continue
+            seen.add(key)
+            ctx_str = f" [{row['rel_context']}]" if row.get("rel_context") else ""
+            lines.append(f"- {row['source']} {row['relation']} {row['target']}{ctx_str}")
         return "\n".join(lines)
 
     def save(self) -> None:

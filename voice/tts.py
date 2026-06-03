@@ -6,6 +6,8 @@ Incluye rotación automática de API Keys.
 
 import logging
 import os
+import shutil
+import subprocess
 import tempfile
 import threading
 import queue
@@ -39,6 +41,10 @@ class TTSEngine:
         else:
             logging.info(f"[TTS] ElevenLabs listo con {len(self.api_keys)} API keys cargadas.")
 
+        self.ffmpeg_available = shutil.which("ffmpeg") is not None
+        if not self.ffmpeg_available:
+            logging.warning("[TTS] ffmpeg no encontrado — síntesis de audio para Telegram no disponible. Instálalo con: winget install ffmpeg")
+
     def _get_current_key(self) -> str:
         if not self.api_keys:
             return ""
@@ -47,6 +53,7 @@ class TTSEngine:
     def _rotate_key(self):
         self.current_key_index += 1
         if self.current_key_index >= len(self.api_keys):
+            self.current_key_index = 0  # resetear para que la próxima llamada no crashee
             raise Exception("Se han agotado todas las API keys de ElevenLabs (Límite de cuota o bloqueadas).")
         logging.info(f"[TTS] Rotando a API Key {self.current_key_index + 1}/{len(self.api_keys)}")
 
@@ -55,12 +62,11 @@ class TTSEngine:
         while True:
             api_key = self._get_current_key()
             
-            # CORRECCIÓN 1: Obtener el Voice ID que le corresponde a la API Key actual
-            if hasattr(self, 'voice_ids') and self.voice_ids:
-                current_voice_id = self.voice_ids[self.current_key_index] if self.current_key_index < len(self.voice_ids) else self.voice_ids[0]
-            else:
-                # Fallback por si acaso no cambiaste el __init__
-                current_voice_id = self.voice_id 
+            current_voice_id = (
+                self.voice_ids[self.current_key_index]
+                if self.current_key_index < len(self.voice_ids)
+                else self.voice_ids[0]
+            )
 
             # Pedimos formato pcm_24000 para que sea compatible directo con sounddevice
             url = f"https://api.elevenlabs.io/v1/text-to-speech/{current_voice_id}?output_format=pcm_24000"
@@ -89,7 +95,6 @@ class TTSEngine:
                     audio_float = audio_data.astype(np.float32) / 32768.0
                     return audio_float, 24000
                 
-                # CORRECCIÓN 2: Se agregó el error 402 a la lista de rotación
                 elif response.status_code in [401, 402, 429]:
                     logging.warning(f"[TTS] Falló key {self.current_key_index + 1} (Status {response.status_code}). Rotando...")
                     self._rotate_key()
@@ -140,31 +145,67 @@ class TTSEngine:
         play_all()
 
     def synthesize_for_telegram(self, text_es: str) -> str:
-        """Sintetiza audio para Telegram en .ogg"""
+        """
+        Sintetiza el texto completo como un único audio OGG/Opus para Telegram.
+
+        - Divide en oraciones y sintetiza cada una (misma estrategia que speak()).
+        - Concatena los arrays de audio antes de escribir el archivo.
+        - El WAV intermedio siempre se elimina (finally).
+        - El OGG solo se devuelve si la conversión fue exitosa; en cualquier
+          error retorna "" para que el bot caiga al fallback de texto.
+        - Si ffmpeg no está disponible retorna "" inmediatamente.
+        """
+        if not self.ffmpeg_available:
+            logging.warning("[TTS] ffmpeg no disponible — enviando respuesta como texto")
+            return ""
+
+        tmp_wav_path: str | None = None
+        tmp_ogg_path: str | None = None
+
         try:
             import soundfile as sf
-            samples, sr = self._synthesize(text_es)
 
-            if len(samples) == 0:
+            sentences = _split_sentences(text_es) or [text_es]
+            chunks: list[np.ndarray] = []
+            for sentence in sentences:
+                samples, _ = self._synthesize(sentence)
+                if len(samples) > 0:
+                    chunks.append(samples)
+
+            if not chunks:
                 return ""
 
-            tmp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            tmp_wav.close()
-            sf.write(tmp_wav.name, samples, sr)
+            combined = np.concatenate(chunks)
 
-            tmp_ogg = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
+            tmp_wav      = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            tmp_wav_path = tmp_wav.name
+            tmp_wav.close()
+
+            tmp_ogg      = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
+            tmp_ogg_path = tmp_ogg.name
             tmp_ogg.close()
-            try:
-                import subprocess
-                subprocess.run(
-                    ["ffmpeg", "-i", tmp_wav.name, "-c:a", "libopus", tmp_ogg.name, "-y"],
-                    check=True, capture_output=True
-                )
-                os.unlink(tmp_wav.name)
-                return tmp_ogg.name
-            except Exception:
-                os.unlink(tmp_ogg.name)
-                return tmp_wav.name
+
+            sf.write(tmp_wav_path, combined, 24000)
+            subprocess.run(
+                ["ffmpeg", "-i", tmp_wav_path, "-c:a", "libopus", tmp_ogg_path, "-y"],
+                check=True,
+                capture_output=True,
+            )
+            return tmp_ogg_path  # el caller (telegram_bot) es responsable de borrarlo
+
         except Exception as e:
-            logging.error(f"[TTS] Error para Telegram: {e}")
+            logging.error(f"[TTS] Error sintetizando audio para Telegram: {e}")
+            if tmp_ogg_path:
+                try:
+                    os.unlink(tmp_ogg_path)
+                except Exception:
+                    pass
             return ""
+
+        finally:
+            # El WAV es siempre un archivo intermedio — se elimina pase lo que pase
+            if tmp_wav_path:
+                try:
+                    os.unlink(tmp_wav_path)
+                except Exception:
+                    pass

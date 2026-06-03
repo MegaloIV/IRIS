@@ -3,23 +3,222 @@ core/claude_delegate.py
 Detección y delegación de tareas complejas a Claude Code.
 
 Flujo:
-  1. needs_delegation()  — siempre True; IntentAgent decide si delegar realmente
-  2. IntentAgent.analyze() — Groq entiende el intent real y genera un prompt técnico
-  3. ClaudeDelegator.run_sync() — llama a Claude Code con ese prompt optimizado
+  1. IntentAgent.analyze() — Groq entiende el intent real y genera un prompt técnico
+  2. ClaudeDelegator.run_sync() — llama a Claude Code con ese prompt optimizado
 """
 
 import base64
 import json
 import os
+import re
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
 
-def needs_delegation(user_input: str) -> tuple[bool, str | None]:
-    """Always delegates — IntentAgent.analyze() decides whether to actually call Claude Code."""
-    return True, None
+# ─── Pre-filtro heurístico ────────────────────────────────────────────────────
+
+_DELEGATION_PATTERNS = [
+    re.compile(
+        r'\b(crea?r?|escrib[ei]r?|genera?r?|busca?r?|lee?r?|analiza?r?|'
+        r'resum[ei]r?|guarda?r?|abre?r?|ejecuta?r?|modifica?r?|edita?r?|lista?r?)\b',
+        re.I,
+    ),
+    re.compile(
+        r'\.(py|txt|pdf|docx?|xlsx?|jpg|jpeg|png|gif|webp|csv|json|md|html?|js|ts|cpp?|c|java|rb|go|rs|sh|yaml|toml)\b',
+        re.I,
+    ),
+    re.compile(
+        r'\b(archivo|carpeta|directorio|escritorio|documento|código|script|'
+        r'programa|función|clase|módulo|proyecto|repositorio|repo)\b',
+        re.I,
+    ),
+    re.compile(r'\bPATH_\w+', re.I),
+    # desktop control
+    re.compile(
+        r'\b(clicke?a?r?|hace?r? click|mouse|pantalla|ventana|aplicaci[oó]n|'
+        r'spotify|chrome|firefox|navegador|notepad|calculadora|abre? el|'
+        r'cierra? el|minimiza?|maximiza?|escrib[eí] en|tecla|atajo|'
+        r'captura de pantalla|screenshot|que hay en (la )?pantalla)\b',
+        re.I,
+    ),
+]
+
+
+def _quick_delegate_check(text: str, file_path: str | None) -> bool:
+    """True si el mensaje tiene señales de necesitar Claude Code. False → chat directo."""
+    if file_path:
+        return True
+    return any(p.search(text) for p in _DELEGATION_PATTERNS)
+
+
+# ─── Detección de errores ─────────────────────────────────────────────────────
+
+_ERROR_PREFIXES = ("[Error", "[Claude Code", "[Timeout", "[Error al invocar")
+
+
+def _is_claude_error(raw: str) -> bool:
+    """True si Claude Code devolvió un error en lugar de contenido útil."""
+    return any(raw.startswith(p) for p in _ERROR_PREFIXES)
+
+
+# ─── Validación de rutas ──────────────────────────────────────────────────────
+
+_PATH_REF_RE = re.compile(r'PATH_\w+')
+
+
+def _validate_path_refs(prompt: str) -> list[str]:
+    """Variables PATH_ referenciadas en el prompt pero no definidas en el entorno."""
+    refs = set(_PATH_REF_RE.findall(prompt))
+    return [r for r in refs if r not in os.environ]
+
+
+# ─── Etiquetas de tarea (para que Iris hable en primera persona) ──────────────
+
+_TASK_LABELS: dict[str, str] = {
+    "file_creation":      "Lo que acabo de crear",
+    "file_reading":       "Lo que encontré al revisar el archivo",
+    "file_search":        "Lo que encontré buscando",
+    "report_generation":  "El análisis que hice",
+    "image_analysis":     "Lo que estoy viendo",
+    "document_analysis":  "Lo que leí en el documento",
+    "code_generation":    "El código que escribí",
+    "other":              "Lo que procesé",
+}
+
+
+# ─── Companion desktop ───────────────────────────────────────────────────────
+
+_COMPANION_BAT_WSL = Path(__file__).parent.parent / "companion" / "start.bat"
+
+
+def _wsl_to_windows_path(path: str) -> str:
+    p = str(path)
+    if p.startswith("/mnt/"):
+        parts = p[5:].split("/", 1)
+        drive = parts[0].upper()
+        rest  = parts[1].replace("/", "\\") if len(parts) > 1 else ""
+        return f"{drive}:\\{rest}"
+    return p
+
+
+def _get_windows_host_ip() -> str:
+    """Devuelve la IP del host Windows vista desde WSL2."""
+    # Método 1: ip route (parseo en Python, sin depender de awk)
+    try:
+        result = subprocess.run(
+            ["ip", "route", "show", "default"],
+            capture_output=True, text=True, timeout=3,
+        )
+        for line in result.stdout.splitlines():
+            if "default via" in line:
+                parts = line.split()
+                return parts[parts.index("via") + 1]
+    except Exception:
+        pass
+    # Método 2: resolv.conf
+    try:
+        with open("/etc/resolv.conf") as f:
+            for line in f:
+                if line.startswith("nameserver"):
+                    return line.split()[1]
+    except Exception:
+        pass
+    return "localhost"
+
+
+def get_claude_companion_url(companion_url: str) -> str:
+    """
+    Transforma la URL del companion para que sea alcanzable desde el entorno
+    bash de Claude Code, que no tiene acceso al relay localhost→Windows de WSL2.
+    """
+    import re
+    if re.search(r'localhost|127\.0\.0\.1', companion_url):
+        port = companion_url.rsplit(":", 1)[-1].strip("/")
+        return f"http://{_get_windows_host_ip()}:{port}"
+    return companion_url
+
+
+def take_desktop_snapshot(companion_url: str) -> dict:
+    """Toma screenshot + elementos UI. Retorna el dict del companion."""
+    import requests as _req
+    resp = _req.get(f"{companion_url}/screenshot", timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def execute_desktop_actions(actions: list[dict], companion_url: str) -> str:
+    """Ejecuta la lista de acciones devuelta por Claude Code vía el companion."""
+    import requests as _req
+    import time
+    done = []
+    for act in actions:
+        atype = act.get("action", "")
+        try:
+            if atype == "launch":
+                _req.post(f"{companion_url}/launch", json={"app": act["app"]}, timeout=5)
+                done.append(f"Abrí {act['app']}")
+                time.sleep(1.5)
+            elif atype == "click":
+                _req.post(f"{companion_url}/click", json={"x": act["x"], "y": act["y"], "button": act.get("button", "left")}, timeout=5)
+                done.append(f"Click en ({act['x']}, {act['y']})")
+            elif atype == "double_click":
+                _req.post(f"{companion_url}/double_click", json={"x": act["x"], "y": act["y"]}, timeout=5)
+                done.append(f"Doble click en ({act['x']}, {act['y']})")
+            elif atype == "right_click":
+                _req.post(f"{companion_url}/right_click", json={"x": act["x"], "y": act["y"]}, timeout=5)
+                done.append(f"Click derecho en ({act['x']}, {act['y']})")
+            elif atype == "type":
+                _req.post(f"{companion_url}/type", json={"text": act["text"]}, timeout=5)
+                done.append(f"Escribí: {act['text']}")
+            elif atype == "key":
+                _req.post(f"{companion_url}/key", json={"key": act["key"]}, timeout=5)
+                done.append(f"Tecla: {act['key']}")
+            elif atype == "hotkey":
+                _req.post(f"{companion_url}/hotkey", json={"keys": act["keys"]}, timeout=5)
+                done.append(f"Atajo: {'+'.join(act['keys'])}")
+            elif atype == "scroll":
+                _req.post(f"{companion_url}/scroll", json={"x": act["x"], "y": act["y"], "direction": act.get("direction", "down"), "amount": act.get("amount", 3)}, timeout=5)
+                done.append(f"Scroll {act.get('direction', 'down')}")
+        except Exception as e:
+            done.append(f"Error en {atype}: {e}")
+    return "\n".join(done) if done else "Sin acciones ejecutadas"
+
+
+def ensure_companion_alive(companion_url: str, timeout: int = 8) -> bool:
+    """Verifica que el companion esté corriendo; si no, lo lanza y espera."""
+    import requests as _req
+    try:
+        _req.get(f"{companion_url}/health", timeout=2)
+        return True
+    except Exception:
+        pass
+
+    bat_win = _wsl_to_windows_path(_COMPANION_BAT_WSL)
+    print(f"[Companion] No está corriendo — iniciando {bat_win}...")
+    try:
+        # start "" abre el bat en su propia ventana (necesario para el servidor)
+        subprocess.Popen(
+            ["cmd.exe", "/c", "start", "", bat_win],
+            close_fds=True,
+        )
+    except Exception as e:
+        print(f"[Companion] Error al iniciar: {e}")
+        return False
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            _req.get(f"{companion_url}/health", timeout=1)
+            print("[Companion] Listo.")
+            return True
+        except Exception:
+            time.sleep(0.5)
+
+    print("[Companion] Timeout esperando al companion.")
+    return False
 
 
 # ─── Intent Agent ─────────────────────────────────────────────────────────────
@@ -56,14 +255,24 @@ class IntentAgent:
 
         try:
             response = self.llm.invoke(prompt_text)
-            raw = response.content.strip().replace("```json", "").replace("```", "").strip()
+            raw = re.sub(r'```(?:json)?\s*', '', response.content).strip()
             result = json.loads(raw)
 
             should = bool(result.get("should_delegate", True))
-            if result.get("task_type") == "conversational":
-                should = False
             claude_prompt = (result.get("claude_prompt") or "").strip() or user_input
             file_path = result.get("file_path") or detected_file_path
+
+            if file_path:
+                should = True
+                if result.get("task_type") == "conversational" and Path(file_path).suffix.lower() in _IMAGE_EXTENSIONS:
+                    claude_prompt = (
+                        f"The user showed you this image and said: '{user_input}'. "
+                        f"Describe what you see in the image in first person, "
+                        f"as if you are seeing it yourself. "
+                        f"Respond naturally, not as a developer analyzing code."
+                    )
+            elif result.get("task_type") == "conversational":
+                should = False
 
             print(
                 f"[IntentAgent] should_delegate={should} "
@@ -138,14 +347,55 @@ FILE_TASK_TYPES = [
 ]
 
 
-def _build_prompt(user_input: str, intent: dict) -> str:
-    """Return the prompt to send to Claude Code, injecting PATH_ env vars only for file tasks."""
+def _build_prompt(user_input: str, intent: dict, iris_context: dict | None = None, companion_url: str = "") -> str:
+    """
+    Construye el prompt final para Claude Code.
+
+    - Añade instrucciones de formato para que la respuesta sea limpia y fácil
+      de integrar como voz de Iris (sin "I've done...", sin preambles).
+    - Inyecta el nombre del usuario si está disponible.
+    - Inyecta PATH_ vars para tareas de archivo.
+    - Si hay PATH_ vars referenciadas pero no definidas, lo indica explícitamente
+      para que Claude Code lo comunique en vez de fallar silenciosamente.
+    """
     prompt = intent["claude_prompt"]
+
+    # Instrucciones de formato — salida limpia para que Iris la integre bien
+    format_block = [
+        "=== OUTPUT INSTRUCTIONS ===",
+        "Return ONLY the result or content requested. No preamble, no 'I've done...', no 'Done!'.",
+        "If the task produces a file: one short confirmation line (e.g. 'Archivo creado en <ruta>').",
+        "If the task produces content (text, code, analysis): return just the content.",
+        "If analysis: findings directly, no meta-commentary about what you are doing.",
+    ]
+    if iris_context and iris_context.get("owner_name"):
+        format_block.append(f"The user's name is: {iris_context['owner_name']}.")
+    format_block.append("=== END INSTRUCTIONS ===")
+
+    prompt = "\n".join(format_block) + "\n\n" + prompt
+
+    # Rutas para tareas de archivo
     if intent.get("task_type") in FILE_TASK_TYPES:
         paths = {k: v for k, v in os.environ.items() if k.startswith("PATH_")}
         if paths:
             path_context = "Available paths:\n" + "\n".join(f"- {k}: {v}" for k, v in paths.items())
             prompt = f"{path_context}\n\n{prompt}"
+
+        missing = _validate_path_refs(prompt)
+        if missing:
+            prompt += (
+                f"\n\nNOTE: The path variable(s) {', '.join(missing)} are referenced but not defined. "
+                "Use the current working directory or clearly state that the path is unknown."
+            )
+
+    # Prompt de control de escritorio
+    if intent.get("task_type") == "desktop_control" and companion_url:
+        from config.prompts import DESKTOP_CONTROL_PROMPT
+        prompt = DESKTOP_CONTROL_PROMPT.format(
+            companion_url=companion_url,
+            task=intent["claude_prompt"],
+        )
+
     return prompt
 
 
@@ -169,9 +419,10 @@ class ClaudeDelegator:
 
         print(f"[Claude Code] PROMPT ENVIADO:\n{full_prompt}")
 
+        from config.settings import settings
         cmd = [
             "wsl",
-            "/home/matias/.npm-global/bin/claude",
+            settings.claude.bin_path,
             "--dangerously-skip-permissions",
             "-p", full_prompt,
         ]
@@ -181,6 +432,7 @@ class ClaudeDelegator:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=self.TIMEOUT_SECONDS,
             )
             print(f"[Claude Code] RETURN CODE: {result.returncode}")

@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QPushButton
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 
 _BTN_OPTION = """
     QPushButton {
@@ -22,6 +22,8 @@ _BTN_OPTION = """
 
 class SettingsPanel(QWidget):
     """Floating config panel opened from the gear button."""
+
+    claude_delegation_enabled = pyqtSignal(bool)
 
     def __init__(self):
         super().__init__(
@@ -83,6 +85,21 @@ class SettingsPanel(QWidget):
 
         layout.addWidget(self.btn_voice)
         layout.addWidget(self.btn_text_mode)
+
+        section_lbl2 = QLabel("INTELIGENCIA")
+        section_lbl2.setStyleSheet(
+            "color: #666; font-size: 9px; letter-spacing: 1px;"
+            " margin-top: 6px; margin-bottom: 3px;"
+        )
+        layout.addWidget(section_lbl2)
+
+        self.btn_claude = QPushButton("🤖  Consultar Claude")
+        self.btn_claude.setCheckable(True)
+        self.btn_claude.setChecked(True)
+        self.btn_claude.setStyleSheet(_BTN_OPTION)
+        self.btn_claude.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_claude.toggled.connect(self.claude_delegation_enabled)
+        layout.addWidget(self.btn_claude)
 
         outer.addWidget(panel)
         self.setFixedWidth(190)

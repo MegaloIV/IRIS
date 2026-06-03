@@ -9,35 +9,42 @@ Only responds to TELEGRAM_OWNER_ID; all other senders are silently ignored.
 import asyncio
 import logging
 import os
+import re
+import tempfile
+from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from telegram import Bot, Update
 from telegram.constants import ChatAction
 
 from config.settings import settings
-from config.prompts import TELEGRAM_INTERFACE_ADDON
+from config.prompts import TELEGRAM_INTERFACE_ADDON, TELEGRAM_VOICE_OPTION
 
 logger = logging.getLogger(__name__)
 
 _MAX_LEN = 4096
-_TYPING_INTERVAL = 4  # seconds — Telegram's indicator expires after 5s
+_TYPING_INTERVAL = 4       # seconds — Telegram's indicator expires after 5s
+_MSG_DELAY = 0.8           # seconds between split messages
+_SENTENCE_SPLIT = re.compile(r'(?<=[.!?…])\s+')
 
 
-def _split_text(text: str) -> list[str]:
-    """Split at the last newline before 4096 chars; falls back to hard split."""
-    if len(text) <= _MAX_LEN:
-        return [text]
-    chunks: list[str] = []
-    while text:
-        if len(text) <= _MAX_LEN:
-            chunks.append(text)
-            break
-        split_at = text.rfind("\n", 0, _MAX_LEN)
-        if split_at <= 0:
-            split_at = _MAX_LEN
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip("\n")
-    return chunks
+def _split_into_messages(text: str) -> list[str]:
+    """Split into short chat-style messages: max 2 sentences per message.
+    Paragraph breaks always produce a new message. Hard-caps at 4096 chars."""
+    paragraphs = [p.strip() for p in re.split(r'\n\n+', text) if p.strip()]
+    messages: list[str] = []
+    for para in paragraphs:
+        sentences = [s.strip() for s in _SENTENCE_SPLIT.split(para) if s.strip()]
+        if not sentences:
+            continue
+        for i in range(0, len(sentences), 2):
+            chunk = " ".join(sentences[i:i + 2])
+            while len(chunk) > _MAX_LEN:
+                messages.append(chunk[:_MAX_LEN])
+                chunk = chunk[_MAX_LEN:]
+            if chunk:
+                messages.append(chunk)
+    return messages or [text]
 
 
 def create_telegram_app(iris) -> FastAPI:
@@ -62,9 +69,27 @@ def create_telegram_app(iris) -> FastAPI:
         try:
             from voice.tts import TTSEngine
             tts = TTSEngine()
-            logger.info("[Telegram] TTS activo — se enviarán mensajes de voz")
+            if not tts.ffmpeg_available:
+                logger.warning(
+                    "[Telegram] TTS habilitado pero ffmpeg no está instalado — "
+                    "las respuestas se enviarán como texto. "
+                    "Instala ffmpeg para activar audio: winget install ffmpeg"
+                )
+                tts = None
+            else:
+                logger.info("[Telegram] TTS activo — se enviarán mensajes de voz")
         except Exception as e:
             logger.warning(f"[Telegram] TTS no disponible, usando solo texto: {e}")
+
+    # Optional STT — transcribes incoming voice notes
+    stt = None
+    if settings.telegram.stt_enabled:
+        try:
+            from voice.stt import STTEngine
+            stt = STTEngine()
+            logger.info("[Telegram] STT activo — se transcribirán mensajes de voz entrantes")
+        except Exception as e:
+            logger.warning(f"[Telegram] STT no disponible: {e}")
 
     async def _keep_typing(chat_id: int, stop: asyncio.Event) -> None:
         """Refresh the typing indicator every _TYPING_INTERVAL seconds."""
@@ -85,7 +110,7 @@ def create_telegram_app(iris) -> FastAPI:
             return Response(status_code=200)
 
         message = update.message or update.edited_message
-        if not message or not message.text:
+        if not message:
             return Response(status_code=200)
 
         chat_id = message.chat_id
@@ -95,19 +120,64 @@ def create_telegram_app(iris) -> FastAPI:
             logger.warning(f"[Telegram] Mensaje ignorado — user_id={user_id} no es el owner")
             return Response(status_code=200)
 
-        user_input = message.text.strip()
-        logger.info(f"[Telegram] ← {user_input[:100]}")
+        # Resolve user_input and download any attached file to a temp path
+        temp_file_path: str | None = None
+
+        if message.photo:
+            tg_file = await bot.get_file(message.photo[-1].file_id)
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+            tmp.close()
+            await tg_file.download_to_drive(tmp.name)
+            temp_file_path = tmp.name
+            user_input = (message.caption or "mira esto").strip()
+            logger.info(f"[Telegram] ← [imagen] {user_input[:80]}")
+        elif message.document:
+            doc    = message.document
+            suffix = Path(doc.file_name).suffix if doc.file_name else ""
+            tg_file = await bot.get_file(doc.file_id)
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+            tmp.close()
+            await tg_file.download_to_drive(tmp.name)
+            temp_file_path = tmp.name
+            user_input = (message.caption or "mira esto").strip()
+            logger.info(f"[Telegram] ← [archivo: {doc.file_name}] {user_input[:80]}")
+        elif message.voice or message.audio:
+            media   = message.voice or message.audio
+            suffix  = ".ogg" if message.voice else (Path(media.file_name).suffix if getattr(media, "file_name", None) else ".ogg")
+            tg_file = await bot.get_file(media.file_id)
+            tmp     = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+            tmp.close()
+            await tg_file.download_to_drive(tmp.name)
+            if stt:
+                transcribed = stt.transcribe_file(tmp.name)
+                os.unlink(tmp.name)
+                if not transcribed:
+                    logger.warning("[Telegram] STT no obtuvo texto del audio")
+                    return Response(status_code=200)
+                user_input = transcribed
+                logger.info(f"[Telegram] ← [voz→texto] {user_input[:100]}")
+            else:
+                os.unlink(tmp.name)
+                logger.info("[Telegram] Audio recibido pero STT desactivado — ignorando")
+                return Response(status_code=200)
+        elif message.text:
+            user_input = message.text.strip()
+            logger.info(f"[Telegram] ← {user_input[:100]}")
+        else:
+            return Response(status_code=200)
 
         loop     = asyncio.get_event_loop()
         stop_evt = asyncio.Event()
         typing   = asyncio.create_task(_keep_typing(chat_id, stop_evt))
 
+        iface_ctx = TELEGRAM_INTERFACE_ADDON + (TELEGRAM_VOICE_OPTION if tts else "")
         try:
             response_text = await loop.run_in_executor(
                 None,
                 lambda: iris.delegate_to_claude(
                     user_input,
-                    interface_context=TELEGRAM_INTERFACE_ADDON,
+                    file_path=temp_file_path,
+                    interface_context=iface_ctx,
                 ),
             )
         except Exception as e:
@@ -116,11 +186,20 @@ def create_telegram_app(iris) -> FastAPI:
         finally:
             stop_evt.set()
             typing.cancel()
+            if temp_file_path:
+                try:
+                    os.unlink(temp_file_path)
+                except Exception:
+                    pass
 
-        logger.info(f"[Telegram] → {response_text[:100]}")
+        # Parse optional [VOZ] tag — Iris decides to send voice
+        wants_voice = response_text.startswith("[VOZ]")
+        if wants_voice:
+            response_text = response_text[5:].strip()
 
-        # Prefer voice when TTS is enabled
-        if tts:
+        logger.info(f"[Telegram] → {'[VOZ] ' if wants_voice else ''}{response_text[:100]}")
+
+        if wants_voice and tts:
             try:
                 ogg_path = await loop.run_in_executor(
                     None, tts.synthesize_for_telegram, response_text
@@ -134,9 +213,12 @@ def create_telegram_app(iris) -> FastAPI:
             except Exception as e:
                 logger.warning(f"[Telegram] TTS falló, enviando texto: {e}")
 
-        # Text fallback — split if over 4096 chars
-        for chunk in _split_text(response_text):
-            await bot.send_message(chat_id=chat_id, text=chunk)
+        # Send as text (default, or fallback if TTS failed)
+        parts = _split_into_messages(response_text)
+        for i, part in enumerate(parts):
+            await bot.send_message(chat_id=chat_id, text=part)
+            if i < len(parts) - 1:
+                await asyncio.sleep(_MSG_DELAY)
 
         return Response(status_code=200)
 
