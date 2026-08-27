@@ -190,14 +190,27 @@ WAKE_WORD=iris
 WAKE_WORD_SENSITIVITY=0.5
 WAKE_WORD_MODEL_PATH=data/wake_word/iris.onnx
 
-# Telegram (próxima fase)
+# Telegram
 TELEGRAM_ENABLED=false
 TELEGRAM_TOKEN=
 TELEGRAM_USER_ID=
 
-# Server (próxima fase)
+# Server
 SERVER_HOST=0.0.0.0
 SERVER_PORT=8000
+
+# Modo de ejecución: local (por defecto) | server | client
+# En server/client, IRIS_AGENT_TOKEN debe ser el MISMO en las dos máquinas.
+IRIS_MODE=local
+IRIS_SERVER_URL=http://localhost:8000
+IRIS_AGENT_TOKEN=
+IRIS_AGENT_NAME=portatil
+
+# Dominio que sirve Caddy en docker-compose (si no, cae a iris.localhost)
+IRIS_DOMAIN=
+
+# Claude Code — herramientas permitidas sin preguntar (Bash excluido a propósito)
+CLAUDE_ALLOWED_TOOLS=Read,Write,Edit,Glob,Grep,WebSearch,WebFetch
 ```
 
 ---
@@ -215,13 +228,23 @@ config.yaml        # ya no se usa, puedes borrarlo
 
 ---
 
-## 🗺️ Fases completadas
+## 🗺️ Estado
 
-- ✅ Fase 1 — Core conversacional (LangGraph + personalidad + trust)
-- ✅ Fase 2 — Memoria LTM (Supabase pgvector + grafo en PostgreSQL)
-- ✅ Fase 3 — Voz (Whisper STT + Coqui/Edge TTS + OpenWakeWord)
-- ⏳ Fase 4 — Avatar 2D
-- ⏳ Fase 5 — Herramientas (control del PC, Spotify, VSCode, etc.)
-- ⏳ Fase 6 — Telegram Bot
-- ⏳ Fase 7 — Proactividad (rutinas, iniciativa propia)
-- ⏳ Fase 8 — Deploy Railway + acceso remoto
+La hoja de ruta viva está en [docs/iris-desacoplada.html](docs/iris-desacoplada.html);
+esto es el resumen.
+
+Ya funciona:
+
+- Core conversacional (LangGraph + personalidad + trust)
+- Memoria LTM: Supabase pgvector + grafo en el mismo PostgreSQL
+- Voz (Whisper STT + ElevenLabs/Edge TTS) y avatar 2D
+- Herramientas: control del escritorio, archivos y código vía Claude Code
+- Bot de Telegram (texto y notas de voz)
+- Preferencias propias — gustos que se forman solos y la hacen poder negarse (`/gustos`)
+- Proceso partible en dos: `IRIS_MODE=server` en un servidor, `client` en el portátil
+
+Pendiente:
+
+- Desplegar el servidor (los ficheros de Docker y Caddy ya están; falta la VM y el dominio)
+- Diario y vida autónoma — las tablas existen, el motor todavía no
+- Claude por API en vez de por suscripción — opcional, y solo si compensa (`/coste`)

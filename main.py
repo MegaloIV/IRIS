@@ -80,7 +80,7 @@ from ui.avatar import IrisAvatarUI
 from ui.signals import IrisSignals
 from ui.terminal_overlay import TerminalOutputUI
 from core.startup import setup_telegram, setup_proactive, setup_voice, setup_agent_link
-from core.commands import handle_command, dispatch_input
+from core.commands import handle_command, dispatch_input, is_command
 
 
 def main():
@@ -139,7 +139,10 @@ def main():
 
     def handle_ui_input(user_input: str, attached_file: str = ""):
         print(f"\nTú (UI): {user_input}")
-        if user_input.startswith("/"):
+        # is_command, no startswith("/"): así una barra que no sea un comando le
+        # llega a Iris como texto, igual que por Telegram. Los tres canales
+        # reconocen exactamente la misma lista.
+        if is_command(user_input):
             out = (iris.run_command(user_input) if settings.mode.mode == "client"
                    else handle_command(user_input, iris))
             ui_signals.terminal_output_updated.emit(out)
@@ -191,7 +194,7 @@ def main():
                 user_input = input("\nTú: ").strip()
                 if not user_input:
                     continue
-                if user_input.startswith("/"):
+                if is_command(user_input):
                     print(iris.run_command(user_input) if settings.mode.mode == "client"
                           else handle_command(user_input, iris))
                     continue

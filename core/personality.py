@@ -33,6 +33,9 @@ class Mood(str, Enum):
     FOCUSED     = "focused"
 
 
+_REGEN_PER_HOUR = 12.0   # puntos de energía recuperados por hora de descanso
+
+
 class TrustStage(str, Enum):
     STRANGER     = "stranger"
     ACQUAINTANCE = "acquaintance"
@@ -48,6 +51,10 @@ class EmotionalState:
     energy: float = 100.0
     irritation_count: int = 0
     last_interaction: Optional[str] = None
+    # Marca propia del regen de energía. No sirve last_interaction: el regen se
+    # acumula aunque no haya interacción, y mezclarlos hacía que llamarlo dos
+    # veces sumara el mismo tramo dos veces.
+    energy_updated_at: Optional[str] = None
     inside_jokes: list = field(default_factory=list)
     owner_nickname: Optional[str] = None
     proactive_sent_today: int = 0
@@ -60,6 +67,7 @@ class EmotionalState:
             "energy":               self.energy,
             "irritation_count":     self.irritation_count,
             "last_interaction":     self.last_interaction,
+            "energy_updated_at":    self.energy_updated_at,
             "inside_jokes":         self.inside_jokes,
             "owner_nickname":       self.owner_nickname,
             "proactive_sent_today": self.proactive_sent_today,
@@ -74,6 +82,9 @@ class EmotionalState:
         obj.energy               = data.get("energy", 100.0)
         obj.irritation_count     = data.get("irritation_count", 0)
         obj.last_interaction     = data.get("last_interaction")
+        # Estados guardados antes de que existiera el campo: se arranca el reloj
+        # en la última interacción conocida, que es donde estaba el origen antes.
+        obj.energy_updated_at    = data.get("energy_updated_at") or data.get("last_interaction")
         obj.inside_jokes         = data.get("inside_jokes", [])
         obj.owner_nickname       = data.get("owner_nickname")
         obj.proactive_sent_today = data.get("proactive_sent_today", 0)
@@ -95,7 +106,7 @@ class PersonalityEngine:
         # necesitan el lock — con uno simple se bloquearía a sí mismo.
         self._lock         = threading.RLock()
         self._apply_time_decay()
-        self._apply_energy_regen()
+        self.refresh_energy()
 
     def set_analysis_llm(self, llm):
         self._analysis_llm = llm
@@ -120,6 +131,7 @@ class PersonalityEngine:
         """
         partes: list[str] = []
 
+        self.refresh_energy()
         energia = self.state.energy
         if energia < 25:
             partes.append("Estás agotada; te cuesta que te apetezca cualquier cosa.")
@@ -199,24 +211,67 @@ class PersonalityEngine:
             self.save_state()
 
     def _apply_energy_regen(self):
-        """Regenerate energy based on hours elapsed since last interaction (12 pts/hour).
-        Also sets mood to LONELY after 4h of silence."""
+        """
+        Acumula energía por el tiempo transcurrido desde la última vez que se
+        aplicó — no desde la última interacción.
+
+        La distinción es la que hace que se pueda llamar en caliente. Midiendo
+        desde `last_interaction`, dos llamadas seguidas sumaban el mismo tramo
+        dos veces, así que solo era seguro llamarlo una vez por arranque: en un
+        proceso largo la energía bajaba con cada turno y no subía nunca.
+        """
+        now = datetime.now()
+        with self._lock:
+            origen = self.state.energy_updated_at
+            if not origen:
+                self.state.energy_updated_at = now.isoformat()
+                return
+
+            hours = (now - datetime.fromisoformat(origen)).total_seconds() / 3600
+            # Por debajo de media hora el regen es ruido y no compensa mover la
+            # marca: dejándola quieta, el tiempo se acumula para la próxima.
+            if hours < 0.5:
+                return
+
+            regen = hours * _REGEN_PER_HOUR
+            old   = self.state.energy
+            self.state.energy            = min(100.0, self.state.energy + regen)
+            self.state.energy_updated_at = now.isoformat()
+            if self.state.energy > old:
+                logging.debug(
+                    f"[Energy] Regen +{regen:.1f} tras {hours:.1f}h → {self.state.energy:.1f}"
+                )
+
+    def _apply_loneliness(self):
+        """El mood LONELY mide silencio, no energía — son dos relojes distintos."""
         if not self.state.last_interaction:
             return
         last         = datetime.fromisoformat(self.state.last_interaction)
         hours_silent = (datetime.now() - last).total_seconds() / 3600
-        if hours_silent >= 0.5:
-            regen = hours_silent * 12.0
-            old   = self.state.energy
-            self.state.energy = min(100.0, self.state.energy + regen)
-            if self.state.energy > old:
-                logging.debug(f"[Energy] Regen +{regen:.1f} tras {hours_silent:.1f}h → {self.state.energy:.1f}")
         if hours_silent >= 4.0 and self.state.mood != Mood.LONELY:
             self.state.mood = Mood.LONELY
             logging.info(f"[Personality] Mood → LONELY ({hours_silent:.1f}h sin interacción)")
 
+    def refresh_energy(self):
+        """
+        Pone la energía al día. Barato e idempotente: llamarlo de más no hace
+        nada, y llamarlo de menos deja a Iris cansada para siempre.
+        """
+        self._apply_energy_regen()
+        self._apply_loneliness()
+
+    def spend_energy(self, amount: float, reason: str = ""):
+        """Pensar cuesta. Sin esto el motor autónomo rumiaría sin parar."""
+        with self._lock:
+            self.refresh_energy()
+            self.state.energy = max(0.0, self.state.energy - amount)
+        logging.debug(f"[Energy] −{amount:.1f} ({reason}) → {self.state.energy:.1f}")
+
     def record_interaction(self):
         with self._lock:
+            # Primero al día, luego el coste del turno: si no, el −1 se aplica
+            # sobre una energía que lleva horas congelada.
+            self._apply_energy_regen()
             self.state.last_interaction = datetime.now().isoformat()
             self.adjust_trust(2.0, "interacción normal")
             self.state.energy = max(0.0, self.state.energy - 1.0)
@@ -296,6 +351,7 @@ class PersonalityEngine:
     # ─── Energy ───────────────────────────────────────────────────────────────
 
     def get_energy_stage(self) -> str:
+        self.refresh_energy()
         e = self.state.energy
         if e >= 70: return "high"
         if e >= 40: return "medium"

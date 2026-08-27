@@ -41,17 +41,76 @@ def agent_available(capability: str) -> bool:
 
 # ─── Claude ───────────────────────────────────────────────────────────────────
 
-def run_claude(prompt: str, file_path: str = None) -> str:
+def run_claude(
+    prompt: str,
+    file_path: str = None,
+    system_prompt: str = "",
+    resume_session: str = "",
+    json_schema: dict = None,
+):
+    """
+    Ejecuta Claude donde toque y devuelve un ClaudeResult.
+
+    El coste se apunta aquí y solo aquí: es el punto por el que pasan los dos
+    modos, así que ni se pierde en remoto ni se cuenta dos veces en local.
+    """
+    from core.claude_delegate import ClaudeResult, ledger
+
     if settings.mode.mode == "server":
-        result = _remote_call(
+        payload = _remote_call(
             P.CAP_CLAUDE, "run",
-            {"prompt": prompt, "file_path": file_path},
+            {
+                "prompt": prompt, "file_path": file_path,
+                "system_prompt": system_prompt, "resume_session": resume_session,
+                "json_schema": json_schema,
+            },
             timeout=float(ClaudeTimeout()),
         )
-        return result.get("output", "")
+        result = ClaudeResult.from_dict(payload)
+    else:
+        from core.claude_delegate import ClaudeDelegator
+        result = ClaudeDelegator().run_sync(
+            prompt, file_path,
+            system_prompt=system_prompt,
+            resume_session=resume_session,
+            json_schema=json_schema,
+        )
 
-    from core.claude_delegate import ClaudeDelegator
-    return ClaudeDelegator().run_sync(prompt, file_path)
+    ledger.record(result)
+    return result
+
+
+def stream_claude(
+    prompt: str,
+    file_path: str = None,
+    system_prompt: str = "",
+    resume_session: str = "",
+    on_text=None,
+):
+    """
+    Como run_claude, pero entregando el texto según se genera.
+
+    En modo servidor no hay streaming: el enlace con el portátil es
+    petición/respuesta, no un canal continuo, así que se cae a la llamada
+    bloqueante y el texto se entrega de una vez al final. Se nota en el ritmo,
+    no en el resultado — y evita fingir un streaming que no existe.
+    """
+    from core.claude_delegate import ClaudeDelegator, ledger
+
+    if settings.mode.mode == "server":
+        result = run_claude(prompt, file_path, system_prompt, resume_session)
+        if on_text and result.ok and result.text:
+            on_text(result.text)
+        return result
+
+    result = ClaudeDelegator().run_stream(
+        prompt, file_path,
+        system_prompt=system_prompt,
+        resume_session=resume_session,
+        on_text=on_text,
+    )
+    ledger.record(result)
+    return result
 
 
 def ClaudeTimeout() -> int:
@@ -91,8 +150,14 @@ def build_local_handlers() -> dict:
     from core.claude_delegate import ClaudeDelegator, companion_get, companion_post
 
     def claude_run(payload: dict) -> dict:
-        out = ClaudeDelegator().run_sync(payload.get("prompt", ""), payload.get("file_path"))
-        return {"output": out}
+        result = ClaudeDelegator().run_sync(
+            payload.get("prompt", ""),
+            payload.get("file_path"),
+            system_prompt=payload.get("system_prompt", ""),
+            resume_session=payload.get("resume_session", ""),
+            json_schema=payload.get("json_schema"),
+        )
+        return result.to_dict()
 
     def desktop_http(payload: dict) -> dict:
         url    = settings.companion.url
@@ -102,16 +167,9 @@ def build_local_handlers() -> dict:
                 else companion_post(url, path, payload.get("payload") or {}, timeout=15))
         resp.raise_for_status()
         try:
-            data = resp.json()
+            return resp.json()
         except Exception:
             return {}
-
-        # La captura se lee AQUÍ, en el portátil, y viaja en base64. El servidor
-        # no puede abrir una ruta de este disco.
-        if path == "/screenshot" and isinstance(data, dict):
-            from core.claude_delegate import _read_screenshot_b64
-            data["image_b64"] = _read_screenshot_b64(data)
-        return data
 
     return {
         (P.CAP_CLAUDE,  "run"):  claude_run,

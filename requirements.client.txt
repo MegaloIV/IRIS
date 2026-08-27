@@ -1,0 +1,31 @@
+# Dependencias del modo cliente: el portátil.
+#
+# Aquí viven la cara y los sentidos — avatar, micrófono, altavoz — y las dos
+# capacidades que se le ofrecen al servidor: Claude con tu suscripción y el
+# escritorio. El cerebro está en el otro lado, así que NO hacen falta LangChain,
+# LangGraph, psycopg2 ni sentence-transformers.
+#
+# Tampoco faster-whisper: el portátil graba y detecta el silencio, pero el WAV
+# viaja al servidor y lo transcribe la API de Groq (VoiceListener recibe
+# `on_audio_input` y entonces no construye ningún STT local). Eso son 1–2 GB de
+# modelo y torch que no se instalan aquí.
+
+# Enlace con el servidor
+requests>=2.31.0
+websockets>=12.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# Interfaz de escritorio (avatar + terminal)
+PyQt6>=6.6.0
+
+# Audio: grabar la voz y reproducir lo que el servidor devuelve
+sounddevice>=0.4.0
+soundfile>=0.12.0
+numpy>=1.24.0
+
+# Botón físico (tecla Copilot / F23)
+pynput>=1.7.0
+
+# El companion de escritorio corre en su propio venv de Windows:
+# ver companion/requirements.txt

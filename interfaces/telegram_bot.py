@@ -19,6 +19,7 @@ from telegram.constants import ChatAction
 
 from config.settings import settings
 from config.prompts import TELEGRAM_INTERFACE_ADDON, TELEGRAM_VOICE_OPTION
+from core.commands import handle_command, is_command
 
 logger = logging.getLogger(__name__)
 
@@ -85,9 +86,13 @@ def create_telegram_app(iris) -> FastAPI:
     stt = None
     if settings.telegram.stt_enabled:
         try:
-            from voice.stt import STTEngine
-            stt = STTEngine()
-            logger.info("[Telegram] STT activo — se transcribirán mensajes de voz entrantes")
+            # build_stt(), no STTEngine(): en modo servidor elige la API de Groq.
+            # Instanciar el motor local aquí cargaba faster-whisper, que ni
+            # siquiera está en requirements.server.txt — así que en el servidor
+            # fallaba y las notas de voz se descartaban diciendo "STT desactivado".
+            from voice.stt import build_stt
+            stt = build_stt()
+            logger.info(f"[Telegram] STT activo ({type(stt).__name__}) — se transcribirán las notas de voz")
         except Exception as e:
             logger.warning(f"[Telegram] STT no disponible: {e}")
 
@@ -166,7 +171,23 @@ def create_telegram_app(iris) -> FastAPI:
         else:
             return Response(status_code=200)
 
-        loop     = asyncio.get_event_loop()
+        loop = asyncio.get_event_loop()
+
+        # Los comandos son los mismos que en la terminal. Antes llegaban a Iris
+        # como texto suelto, así que /gustos o /coste desde el móvil producían
+        # una respuesta conversacional en vez del dato. Sin apagado remoto: un
+        # /salir escrito sin querer no debe tumbar el proceso.
+        # Solo texto suelto: un pie de foto que empiece por barra es un pie de
+        # foto, y además saldríamos de aquí sin borrar el archivo temporal.
+        if temp_file_path is None and is_command(user_input):
+            salida = await loop.run_in_executor(
+                None, lambda: handle_command(user_input, iris, allow_shutdown=False),
+            )
+            for parte in _split_into_messages(salida):
+                await bot.send_message(chat_id=chat_id, text=parte)
+            logger.info(f"[Telegram] → [comando {user_input.split()[0]}]")
+            return Response(status_code=200)
+
         stop_evt = asyncio.Event()
         typing   = asyncio.create_task(_keep_typing(chat_id, stop_evt))
 

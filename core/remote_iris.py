@@ -14,7 +14,6 @@ fila) y entrelazarían el historial.
 
 import json
 import logging
-import threading
 from typing import Callable, Optional
 
 import requests
@@ -137,7 +136,22 @@ class RemoteIris:
         """
         Los comandos se ejecutan en el servidor: /memoria, /gustos y /status
         leen estado que solo existe allí.
+
+        Menos /salir, que es lo único que se refiere a esta máquina: cerrar el
+        cliente. Mandarlo al servidor apagaría el cerebro del que también
+        dependen Telegram y el motor autónomo, y dejaría la ventana abierta.
         """
+        if cmd.strip().split()[:1] == ["/salir"]:
+            self.shutdown()
+            try:
+                from PyQt6.QtWidgets import QApplication
+            except ImportError:
+                pass
+            else:
+                if app := QApplication.instance():
+                    app.quit()
+            return "Cerrando el cliente. Iris sigue viva en el servidor."
+
         try:
             return self._post("/command", {"command": cmd}, timeout=60).get("output", "")
         except Exception as e:

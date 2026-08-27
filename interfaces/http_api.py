@@ -89,7 +89,10 @@ def create_api(iris) -> FastAPI:
 
         def _run():
             try:
-                return handle_command(req.command, iris)
+                # allow_shutdown=False: quien llama está en otra máquina. Un
+                # /salir del portátil debe cerrar el portátil, no el cerebro
+                # del que dependen también Telegram y el motor autónomo.
+                return handle_command(req.command, iris, allow_shutdown=False)
             except Exception as e:
                 # Un comando roto no debe devolver un 500: al otro lado se vería
                 # como "no pude alcanzar el servidor", que es falso y despista.

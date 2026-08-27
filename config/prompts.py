@@ -345,22 +345,6 @@ Responde SOLO con JSON válido, sin texto adicional:
     ]
 }}"""
 
-GRAPH_QUERY_PROMPT = """Dado el siguiente mensaje, extrae las entidades o conceptos clave que podrían estar en un grafo de conocimiento personal.
-
-Mensaje: "{text}"
-
-Responde SOLO con JSON válido:
-{{
-    "entities": ["entidad1", "entidad2"],
-    "relation_types": ["LE_GUSTA", "TRABAJA_CON"]
-}}
-
-Entidades son: personas, tecnologías, proyectos, lugares, conceptos, gustos mencionados.
-Relation_types son las relaciones relevantes al contexto del mensaje.
-Si no hay entidades claras devuelve listas vacías.
-
-Relaciones disponibles: LE_GUSTA, TRABAJA_CON, TRABAJA_EN, CONOCE, USA, LOGRO, ESTUDIA, VIVE_EN, HABLA_CON"""
-
 MEMORY_RELEVANCE_PROMPT = """Analiza la siguiente conversación y decide si contiene información relevante para la memoria a largo plazo de una relación humana.
 
 CONVERSACIÓN:
@@ -423,26 +407,62 @@ Examples of good claude_prompt values:
 """
 
 
+# Esquema de las acciones de escritorio. Se le pasa a Claude Code con
+# --json-schema, así que la salida ya viene conforme y sin comillas de markdown:
+# no hay que arrancarle los ``` a mano ni rezar para que no añada un preámbulo.
+DESKTOP_ACTIONS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "actions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "launch", "click", "double_click", "right_click",
+                            "type", "key", "hotkey", "scroll",
+                        ],
+                    },
+                    "app":       {"type": "string"},
+                    "x":         {"type": "integer"},
+                    "y":         {"type": "integer"},
+                    "text":      {"type": "string"},
+                    "key":       {"type": "string"},
+                    "keys":      {"type": "array", "items": {"type": "string"}},
+                    "direction": {"type": "string", "enum": ["up", "down"]},
+                    "amount":    {"type": "integer"},
+                    "button":    {"type": "string", "enum": ["left", "right", "middle"]},
+                },
+                "required": ["action"],
+            },
+        }
+    },
+    "required": ["actions"],
+}
+
+
 DESKTOP_LAUNCH_PROMPT = """You are selecting the correct app to open from a list of installed apps.
 
 Installed apps:
 {apps}
 
-Return ONLY a JSON array with a single launch action using the EXACT app name from the list above.
-No explanation, no markdown — just the array.
+Return a single launch action using the EXACT app name from the list above.
 
-Example: [{{"action": "launch", "app": "Spotify"}}]
+Example: {{"actions": [{{"action": "launch", "app": "Spotify"}}]}}
 
 TASK: {task}
 """
 
 DESKTOP_CONTROL_PROMPT = """You are analyzing a Windows desktop screenshot to plan actions for a task.
-The screenshot is attached. Screen size: {width}x{height}.
+Open the screenshot with the Read tool before deciding — the path is given below.
+Screen size: {width}x{height}.
 
 UI elements detected (name, type, center coordinates):
 {elements}
 
-Return ONLY a valid JSON array of actions — no explanation, no markdown, just the array.
+Return an object with an "actions" array.
 
 Available action types:
   {{"action": "launch", "app": "spotify"}}         — open app by name or path

@@ -1,7 +1,28 @@
 """
 core/commands.py
-Dispatcher de input y comandos de terminal para Iris.
+Dispatcher de input y comandos de Iris.
+
+Los comandos son los mismos se escriban donde se escriban — terminal, ventana o
+Telegram. Lo único que cambia por canal es si se permite apagar el proceso.
 """
+
+COMMANDS = frozenset({
+    "/status", "/memoria", "/gustos", "/coste",
+    "/guardar", "/reset", "/trust", "/energy", "/salir",
+})
+
+
+def is_command(text: str) -> bool:
+    """
+    ¿Es una de las órdenes de Iris?
+
+    Se comprueba contra la lista, no con un `startswith("/")`, porque en Telegram
+    la barra es parte de la interfaz: `/start` y `/help` los manda el propio
+    cliente. Lo que no esté aquí tiene que llegarle a Iris como texto normal, no
+    rebotar con «comando desconocido».
+    """
+    partes = text.strip().split()
+    return bool(partes) and partes[0].lower() in COMMANDS
 
 
 def dispatch_input(user_input: str, file_path, iris, use_delegation: bool, on_delegating=None) -> str:
@@ -10,7 +31,11 @@ def dispatch_input(user_input: str, file_path, iris, use_delegation: bool, on_de
     return iris.chat(user_input)
 
 
-def handle_command(cmd: str, iris) -> str:
+def handle_command(cmd: str, iris, allow_shutdown: bool = True) -> str:
+    """
+    allow_shutdown: False para los canales remotos. Un `/salir` escrito sin
+    querer desde el móvil no debe tumbar el servidor donde vive Iris.
+    """
     parts   = cmd.strip().split()
     command = parts[0].lower()
     out     = []
@@ -38,10 +63,17 @@ def handle_command(cmd: str, iris) -> str:
                     out.append(f" {i}. [{category}] {content} {importance}")
 
         case "/gustos":
-            # Ventana a las preferencias que se están formando. Todavía NO
-            # influyen en cómo responde Iris — esto es para calibrar el prompt
-            # de extracción antes de conectarlas al system prompt.
+            # Ventana a las preferencias que se están formando. Ya influyen en
+            # cómo responde Iris (personality.build_system_prompt); esto sirve
+            # para calibrar el umbral y ver qué se está asentando.
             out.append(iris.preferences.summary())
+
+        case "/coste":
+            # Lo que costaría la delegación si se pagara por token. Hoy va contra
+            # la suscripción, pero es la cifra que decide si algún día compensa
+            # mover Claude al servidor y dejar de depender del portátil.
+            from core.claude_delegate import ledger
+            out.append(ledger.summary())
 
         case "/guardar":
             out.append("Forzando extracción...")
@@ -78,10 +110,22 @@ def handle_command(cmd: str, iris) -> str:
                 out.append("Error. Uso: /energy +20")
 
         case "/salir":
+            if not allow_shutdown:
+                out.append("Desde aquí no me apago — tendrías que hacerlo en la máquina donde corro.")
+                return "\n".join(out)
             out.append("Guardando y cerrando...")
             iris.shutdown()
-            from PyQt6.QtWidgets import QApplication
-            QApplication.instance().quit()
+            # Cerrar la ventana solo tiene sentido donde hay ventana. En modo
+            # servidor este comando llega por POST /command y aquí no hay Qt
+            # instalado siquiera: importarlo a ciegas convertía un /salir en un
+            # ImportError con pinta de "no pude alcanzar el servidor".
+            try:
+                from PyQt6.QtWidgets import QApplication
+            except ImportError:
+                pass
+            else:
+                if app := QApplication.instance():
+                    app.quit()
 
         case _:
             out.append(f"Comando desconocido: {command}")

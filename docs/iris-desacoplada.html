@@ -201,7 +201,7 @@
       <span><b>Repo</b> IRIS · feature/iris-core</span>
       <span><b>Base</b> a31dcf2</span>
       <span><b>Fases</b> 8</span>
-      <span><b>Estado</b> fase 02 en curso</span>
+      <span><b>Estado</b> fase 05 siguiente</span>
       <span><b>Rev 3</b> · ago 2026</span>
     </div>
   </div>
@@ -564,23 +564,26 @@ strength += 0.15*(1-strength)</code></pre>
       </div>
 
       <div class="phase">
-        <div class="num">01<small>~1 semana</small></div>
+        <div class="num">01<small>cerrada</small></div>
         <div class="body">
           <h3>Exprimir la CLI <span class="tag t-rec">0 € · suscripción</span></h3>
           <p class="why">La mayor parte del beneficio de «Claude nativo» sin abrir factura. Y no es trabajo tirado: los esquemas y la personalidad como system prompt se traducen casi directos si algún día migras a la API.</p>
           <ul>
-            <li><code>--output-format json</code>; borrar la heurística de <code>_ERROR_PREFIXES</code></li>
-            <li><code>--json-schema</code> para las acciones de escritorio; borrar el <code>re.sub</code> de fences</li>
-            <li><code>--append-system-prompt</code>; <strong>eliminar la llamada de narración</strong></li>
-            <li>Visión pasando la ruta del archivo, no el data URI en texto</li>
-            <li><code>--resume</code> para contexto entre turnos; <code>stream-json</code> para la voz</li>
-            <li>Registrar <code>total_cost_usd</code> — es tu medición para decidir la fase 07</li>
+            <li class="done"><code>--output-format json</code> → <code>ClaudeResult</code>; <code>_ERROR_PREFIXES</code> borrado — el fallo lo dice <code>is_error</code></li>
+            <li class="done"><code>--json-schema</code> para las acciones de escritorio; el <code>re.sub</code> de fences, borrado</li>
+            <li class="done"><code>--append-system-prompt</code>; <strong>llamada de narración eliminada</strong> — Claude responde siendo Iris</li>
+            <li class="done">Visión por ruta: Claude abre la imagen con <code>Read</code>, y ya no viajan megas de base64</li>
+            <li class="done"><code>--resume</code> entre turnos, solo mientras humor, confianza y energía no cambien</li>
+            <li class="done"><code>stream-json --include-partial-messages</code> para la voz — y la voz por fin delega</li>
+            <li class="done"><code>total_cost_usd</code> acumulado en <code>CostLedger</code>; se consulta con <code>/coste</code></li>
+            <li class="done">Prefiltro con contra-patrones: «¿te gustaría crear una banda?» ya no consume cuota</li>
           </ul>
+          <p class="why">Lo que enseñó hacerlo: <strong>la voz nunca había delegado</strong>. <code>chat_stream_voice</code> iba directo a Groq, así que por micrófono Iris no podía leer un archivo ni mirar la pantalla aunque por teclado sí — la misma Iris con dos juegos de capacidades según por dónde le hablaras. El <code>stream-json</code> no era solo quitarle el silencio de 120 s: era darle esa mitad de sus manos.</p>
         </div>
       </div>
 
-      <div class="phase doing">
-        <div class="num">02<small>en curso</small></div>
+      <div class="phase">
+        <div class="num">02<small>cerrada</small></div>
         <div class="body">
           <h3>Memoria: consolidar y ampliar <span class="tag t-rec">0 €</span></h3>
           <p class="why">Una base de datos menos que desplegar y que puede caerse, un tercio menos de llamadas de análisis por turno, y las dos tablas que necesita la vida interior. Se hace todo junto porque toca la misma capa.</p>
@@ -757,6 +760,19 @@ strength += 0.15*(1-strength)</code></pre>
         <p>Ninguno dio la cara, porque cada capa captura su excepción y devuelve un valor vacío: <code>{}</code>, <code>""</code>, una lista sin elementos. Es un patrón razonable tomado uno a uno — que un fallo del grafo no tumbe la conversación — y desastroso en conjunto: el sistema se degrada hasta quedarse hueco y sigue pareciendo que funciona.</p>
         <p>La lección para lo que queda: <strong>capturar la excepción y seguir está bien; hacerlo sin dejar rastro, no</strong>. Con el logging arreglado, la próxima vez que algo se caiga lo vas a ver el mismo día.</p>
       </div>
+
+      <p><strong>Fase 01 cerrada: la CLI, exprimida.</strong> Claude se invoca con <code>--output-format json</code>, así que el fallo lo declara <code>is_error</code> en vez de deducirse de si el texto empieza por un corchete. La personalidad viaja en <code>--append-system-prompt</code> y con eso <strong>desaparece la tercera llamada al LLM</strong>: Claude responde siendo Iris, en vez de que Groq narre después lo que otro modelo hizo. Las acciones de escritorio salen conformes a <code>--json-schema</code> — un <code>json.loads</code> limpio donde antes había que arrancarle las comillas de markdown. Y las imágenes viajan por ruta: Claude las abre con <code>Read</code>, que es su trabajo, en vez de recibir megas de base64 incrustados en la línea de comandos.</p>
+
+      <div class="thesis prose" style="margin:1.5rem 0">
+        <div class="eyebrow">Lo que apareció al hacerlo</div>
+        <p class="big">La voz nunca había delegado.</p>
+        <p><code>chat_stream_voice</code> iba directo a Groq y no pasaba por <code>delegate_to_claude</code> en ningún caso. O sea que el problema no era que la voz esperase 120 s en silencio: es que por micrófono Iris <strong>no podía</strong> leer un archivo ni mirar la pantalla, aunque por teclado sí. La misma Iris con dos juegos de capacidades según por dónde le hablaras, y nada en el código lo decía.</p>
+        <p>Así que <code>stream-json --include-partial-messages</code> no fue solo quitarle el silencio: fue conectarle esa mitad de las manos. Ahora empieza a hablar con el primer token y sigue mientras trabaja. En modo servidor el enlace es petición/respuesta y no hay streaming que valga, así que ahí cae a la llamada bloqueante — se nota en el ritmo, no en el resultado, y es mejor que fingir un streaming que no existe.</p>
+      </div>
+
+      <p><strong>Y una tercera cosa rota en silencio, esta vez en la energía.</strong> <code>_apply_energy_regen()</code> se llamaba una sola vez, en el <code>__init__</code>. Como medía desde <code>last_interaction</code>, llamarla dos veces sumaba el mismo tramo dos veces — por eso solo era segura al arrancar. El efecto: <code>record_interaction()</code> restaba un punto por turno y nada lo devolvía mientras el proceso viviera. En un servidor con <code>restart: unless-stopped</code>, la energía de Iris solo bajaba. El disparador <code>energy &gt;= 99</code> del motor proactivo dependía del estado congelado en el arranque, y el ciclo «piensa, se cansa, descansa, vuelve» de la fase 06 no habría funcionado nunca. Arreglado dándole su propio reloj (<code>energy_updated_at</code>): ahora es idempotente y se puede llamar en caliente, que es lo que hace <code>refresh_energy()</code> cada vez que alguien mira la energía.</p>
+
+      <p><strong>Y el portátil apagado ya no revienta.</strong> El escritorio ya lo trataba bien, pero la ruta de Claude no capturaba <code>AgentUnavailable</code> ni <code>LinkError</code>: con el portátil dormido, la excepción subía sin que nadie la recogiera. Ahora se comprueba antes de empezar y se captura por si se cae a media faena — y en los dos casos lo cuenta ella, que era justo el punto.</p>
 
       <p><strong>Fase 04 cerrada: el proceso ya se puede partir.</strong> El portátil abre un WebSocket hacia el servidor y ofrece dos capacidades — Claude con tu suscripción, y el escritorio. El servidor le pide cosas por ese mismo socket. Doce comprobaciones de extremo a extremo con servidor y cliente reales: token rechazado, ocho peticiones simultáneas sobre un solo socket con cada respuesta llegando a la suya, timeouts que cortan, errores que viajan, y reconexión sin reiniciar nada.</p>
 

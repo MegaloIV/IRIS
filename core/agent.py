@@ -7,6 +7,7 @@ Soporta streaming del LLM para síntesis de voz inmediata.
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, Annotated, Optional, Callable
+import logging
 import operator
 import re
 from pathlib import Path
@@ -76,6 +77,9 @@ class IrisAgent:
         self.history.load(self.memory.load_recent_history())
 
         self._voice: Optional[object] = None
+        # (session_id, snapshot de personalidad) de la última delegación, para
+        # reanudar la sesión de Claude mientras siga representando a esta Iris.
+        self._claude_session: Optional[tuple] = None
         self.graph = self._build_graph()
 
         stats = self.memory.get_stats()
@@ -95,6 +99,21 @@ class IrisAgent:
         workflow.add_edge("update_state",      END)
         return workflow.compile()
 
+    def _memory_for(self, text: str) -> str:
+        """
+        Recuerdos relevantes, más lo que Iris puede hacer si le están preguntando
+        justo eso.
+
+        Está aquí y no repetido en cada canal porque si no se olvida en alguno:
+        por voz no se inyectaba, así que preguntarle «¿puedes ver mi pantalla?»
+        en alto le daba una respuesta peor que escribirlo.
+        """
+        memoria = self.memory.get_relevant_memories(text)
+        if _is_capability_question(text):
+            if caps := _capabilities_context():
+                return (memoria + "\n\n" + caps).strip() if memoria else caps
+        return memoria
+
     # ─── Nodos ────────────────────────────────────────────────────────────────
 
     def _analyze_input_node(self, state: IrisState) -> dict:
@@ -112,11 +131,7 @@ class IrisAgent:
 
     def _retrieve_memory_node(self, state: IrisState) -> dict:
         text           = state["messages"][-1].content
-        memory_context = self.memory.get_relevant_memories(text)
-        if _is_capability_question(text):
-            caps = _capabilities_context()
-            if caps:
-                memory_context = (memory_context + "\n\n" + caps).strip() if memory_context else caps
+        memory_context = self._memory_for(text)
         return {
             "messages":         [],
             "current_mood":     state["current_mood"],
@@ -171,14 +186,22 @@ class IrisAgent:
         Chat con streaming para voz.
         Llama on_sentence() con cada oración completa en cuanto el LLM la genera.
         Retorna el texto completo al final.
+
+        Si lo que le piden es una tarea, va por la vía de delegación igual que
+        el texto. Hasta ahora no lo hacía: por voz Iris no podía leer un archivo
+        ni mirar la pantalla, aunque por teclado sí — la misma Iris con dos
+        juegos de capacidades según por dónde le hablaras.
         """
+        if (delegada := self._voice_delegation(user_input, on_sentence)) is not None:
+            return delegada
+
         self.personality.record_interaction()
         changes = self.personality.analyze_input(user_input)
         self.personality.apply_analysis(changes)
 
         from config.prompts import VOICE_MODE_ADDON
         system_content = self.personality.build_system_prompt() + "\n" + VOICE_MODE_ADDON
-        memory_context = self.memory.get_relevant_memories(user_input)
+        memory_context = self._memory_for(user_input)
 
         msgs          = build_messages(system_content, memory_context, self.history.get_window(), HumanMessage(content=user_input))
         full_response = stream_sentences(self.llm, msgs, on_sentence)
@@ -186,6 +209,104 @@ class IrisAgent:
         self.history.append_turn(user_input, full_response)
         self.personality.save_state()
         return full_response
+
+    def _voice_delegation(self, user_input: str, on_sentence: Callable[[str], None]) -> Optional[str]:
+        """
+        Atiende por voz lo que sea una tarea. Devuelve None si no lo era.
+
+        None significa "esto no me toca" y deja seguir al chat normal, que es lo
+        que pasa con la inmensa mayoría de las frases.
+        """
+        from core.claude_delegate import IntentAgent, _build_prompt, _quick_delegate_check
+        from core.executor import agent_available, stream_claude
+        from core.link import protocol as _link
+        from core.utils.streaming import SentenceBuffer
+        from config.prompts import VOICE_MODE_ADDON
+
+        if not _quick_delegate_check(user_input, None):
+            return None
+
+        intent = IntentAgent(self.analysis_llm).analyze(user_input, None)
+        if not intent["should_delegate"]:
+            return None
+
+        # El escritorio no se puede transmitir mientras se hace: hay que mirar,
+        # planificar y ejecutar antes de que haya nada que contar. Se dice entero.
+        if intent.get("task_type") == "desktop_control":
+            if not settings.companion.enabled:
+                return None
+            texto = self._handle_desktop_control(
+                user_input, intent, settings.companion.url, VOICE_MODE_ADDON,
+            )
+            buf = SentenceBuffer(on_sentence)
+            buf.feed(texto)
+            buf.flush()
+            return texto
+
+        if not agent_available(_link.CAP_CLAUDE):
+            return None   # sin portátil, que lo explique el chat normal
+
+        self.personality.record_interaction()
+        changes = self.personality.analyze_input(user_input)
+        self.personality.apply_analysis(changes)
+
+        system_content = self.personality.build_system_prompt() + "\n" + VOICE_MODE_ADDON
+        if memoria := self._memory_for(user_input):
+            system_content += "\n\n" + memoria
+
+        prompt = _build_prompt(user_input, intent, {"owner_name": self.personality.owner_name}, speak_as_iris=True)
+        if historial := self._recent_dialogue():
+            prompt = f"{historial}\n\n=== LO QUE TE ACABA DE DECIR ===\n{prompt}"
+
+        # A partir de aquí ya se ha contado la interacción y puede haber empezado
+        # a hablar, así que este método responde sí o sí: devolver None dejaría
+        # que el chat normal volviera a contarla y a hablar encima.
+        buf   = SentenceBuffer(on_sentence)
+        fallo = ""
+        try:
+            claude = stream_claude(
+                prompt, intent["file_path"],
+                system_prompt=system_content,
+                resume_session=self._claude_session_for(),
+                on_text=buf.feed,
+            )
+            if not claude.ok:
+                fallo = claude.text
+        except _link.LinkError as e:
+            logging.warning(f"[Claude] Enlace caído durante la voz: {e}")
+            claude, fallo = None, str(e)
+        buf.flush()
+
+        if fallo:
+            logging.warning(f"[Claude] Falló la tarea por voz: {fallo[:200]}")
+            # Si ya dijo algo, se queda con eso — repetirlo en otras palabras
+            # suena a tartamudeo. Si no llegó a decir nada, lo explica ahora.
+            if buf.text.strip():
+                respuesta = buf.text
+            else:
+                respuesta = self._speak_failure(user_input, system_content, fallo, on_sentence)
+            self.history.append_turn(user_input, respuesta)
+            self.personality.save_state()
+            return respuesta
+
+        self._claude_session = (claude.session_id, self._personality_snapshot())
+        # El texto dicho es el del stream; `claude.text` es el mismo, ya completo.
+        respuesta = claude.text or buf.text
+        self.history.append_turn(user_input, respuesta)
+        self.personality.save_state()
+        return respuesta
+
+    def _speak_failure(self, user_input: str, system_content: str, detalle: str,
+                       on_sentence: Callable[[str], None]) -> str:
+        """Cuenta en voz alta que la tarea no salió, con la voz de Iris."""
+        from core.utils.streaming import stream_sentences
+        system = system_content + (
+            f"\n\n[Error técnico al ejecutar la tarea]: {detalle}\n"
+            "Dile que no pudiste con ello, con tu estilo y en una o dos frases. "
+            "No copies el error literal."
+        )
+        msgs = [SystemMessage(content=system), *self.history.get_window(), HumanMessage(content=user_input)]
+        return stream_sentences(self.llm, msgs, on_sentence)
 
     # ─── Voz ──────────────────────────────────────────────────────────────────
 
@@ -220,13 +341,14 @@ class IrisAgent:
     )
 
     def _handle_desktop_control(self, user_input: str, intent: dict, companion_url: str, interface_context: str) -> str:
-        import json, re, base64
         from core.claude_delegate import take_desktop_snapshot, execute_desktop_actions
         from core.executor import run_claude, desktop_request
-        from config.prompts import DESKTOP_LAUNCH_PROMPT, DESKTOP_CONTROL_PROMPT
+        from config.prompts import (
+            DESKTOP_LAUNCH_PROMPT, DESKTOP_CONTROL_PROMPT, DESKTOP_ACTIONS_SCHEMA,
+        )
         from langchain_core.messages import SystemMessage, HumanMessage
 
-        task = intent["claude_prompt"]
+        task     = intent["claude_prompt"]
         needs_ui = bool(self._UI_INTERACTION_RE.search(task))
 
         # ── Flujo simple: solo lista de apps, sin screenshot ──────────────────
@@ -236,8 +358,8 @@ class IrisAgent:
             except Exception:
                 apps = []
             apps_text = "\n".join(f"  - {a}" for a in apps) or "  (lista no disponible)"
-            prompt = DESKTOP_LAUNCH_PROMPT.format(apps=apps_text, task=task)
-            raw = run_claude(prompt)
+            prompt    = DESKTOP_LAUNCH_PROMPT.format(apps=apps_text, task=task)
+            claude    = run_claude(prompt, json_schema=DESKTOP_ACTIONS_SCHEMA)
 
         # ── Flujo completo: screenshot + elementos + coords ───────────────────
         else:
@@ -255,24 +377,33 @@ class IrisAgent:
                 width=snap.get("width", "?"), height=snap.get("height", "?"),
                 elements=elements_text, task=task,
             )
-            # La captura ya viene en base64 desde donde esté el escritorio
-            b64 = snap.get("image_b64", "")
-            if b64:
-                prompt += f"\n\n[Attached image: screenshot.png]\ndata:image/png;base64,{b64}"
-                raw = run_claude(prompt)
-            else:
-                raw = run_claude(prompt, snap.get("wsl_path"))
+            # La ruta, no la imagen: Claude corre en la misma máquina que acaba
+            # de guardar la captura, y la abre él con Read.
+            claude = run_claude(
+                prompt, snap.get("wsl_path"), json_schema=DESKTOP_ACTIONS_SCHEMA,
+            )
 
-        print(f"[Desktop] Acciones recibidas: {raw[:200]}")
+        # ── Ejecutar acciones ─────────────────────────────────────────────────
+        if not claude.ok:
+            return self.chat(
+                f"[Intentaste mirar la pantalla y no salió: {claude.text}. "
+                f"Díselo con tu estilo, sin tecnicismos.] {user_input}",
+                interface_context=interface_context,
+            )
 
-        # Ejecutar acciones
         try:
-            actions = json.loads(re.sub(r'```(?:json)?\s*', '', raw).strip())
-            result = execute_desktop_actions(actions, companion_url)
-        except Exception:
-            result = raw
+            # --json-schema garantiza la forma, así que esto es un json.loads
+            # limpio — antes había que quitarle las comillas de markdown a mano.
+            actions = claude.as_json().get("actions", [])
+            logging.info(f"[Desktop] {len(actions)} acción(es) planificadas")
+            result  = execute_desktop_actions(actions, companion_url)
+        except Exception as e:
+            logging.warning(f"[Desktop] No pude interpretar las acciones: {e}")
+            result = claude.text
 
-        # Iris narra en primera persona
+        # ── Iris narra lo que acaba de hacer ──────────────────────────────────
+        # Esta llamada sí se queda: Claude planificó a ciegas y nunca vio el
+        # resultado de ejecutarlas. Narrar lo ejecutado necesita mirar el after.
         self.personality.record_interaction()
         self.personality.save_state()
         self.history.append_turn(user_input, result)
@@ -289,6 +420,57 @@ class IrisAgent:
         msgs = [SystemMessage(content=system), *self.history.get_window(), HumanMessage(content=narration_prompt)]
         return self.llm.invoke(msgs).content
 
+    # ─── Contexto para la delegación ──────────────────────────────────────────
+
+    _DIALOGUE_TURNS = 6
+
+    def _recent_dialogue(self) -> str:
+        """
+        Los últimos turnos, en texto plano, para que Claude sepa de qué se habla.
+
+        Claude mantiene su propia sesión con --resume, pero entre delegación y
+        delegación hay conversación normal que ocurre en Groq y que él no vio.
+        Sin esto, un "y ahora bórralo" no tendría antecedente.
+        """
+        mensajes = self.history.get_window()[-self._DIALOGUE_TURNS * 2:]
+        if not mensajes:
+            return ""
+        lineas = []
+        for m in mensajes:
+            quien = "Tú (Iris)" if isinstance(m, AIMessage) else self.personality.owner_name or "El usuario"
+            texto = (m.content or "").strip().replace("\n", " ")
+            if texto:
+                lineas.append(f"{quien}: {texto[:300]}")
+        if not lineas:
+            return ""
+        return "=== LO QUE VENÍAIS HABLANDO ===\n" + "\n".join(lineas)
+
+    def _personality_snapshot(self) -> tuple:
+        """Lo que, si cambia, hace que reanudar la sesión de Claude sea mentira."""
+        return (
+            self.personality.state.mood.value,
+            self.personality.get_trust_stage().value,
+            self.personality.get_energy_stage(),
+        )
+
+    def _claude_session_for(self) -> str:
+        """
+        El id de sesión a reanudar, si reanudarla sigue siendo honesto.
+
+        --append-system-prompt se fija al abrir la sesión, así que una sesión
+        reanudada conserva el humor y la energía que Iris tenía entonces. Barato
+        mientras no hayan cambiado; falso en cuanto cambian. Cuando cambian, se
+        empieza de cero y Claude vuelve a recibir a la Iris de ahora.
+        """
+        previa = getattr(self, "_claude_session", None)
+        if not previa:
+            return ""
+        session_id, snapshot = previa
+        if snapshot != self._personality_snapshot():
+            logging.debug("[Claude] La personalidad cambió; sesión nueva.")
+            return ""
+        return session_id
+
     # ─── Delegación a Claude Code ─────────────────────────────────────────────
 
     def delegate_to_claude(self, user_input: str, file_path: str | None = None, on_delegating: Callable | None = None, interface_context: str = "") -> str:
@@ -297,20 +479,18 @@ class IrisAgent:
 
         1. Pre-filtro heurístico — descarta mensajes conversacionales sin llamar al LLM
         2. IntentAgent — clasifica la intención y genera el prompt técnico
-        3. Claude Code — ejecuta la tarea y devuelve resultado limpio
-        4. Error handling — si Claude Code falla, Iris lo comunica con su personalidad
-        5. Inyección consciente — Iris recibe el resultado como algo que ella misma hizo,
-           responde en primera persona sin mencionar herramientas externas
+        3. Contexto de Iris — personalidad, memoria y canal, para el system prompt
+        4. Claude Code — hace la tarea y la cuenta él mismo con la voz de Iris
+        5. Si falla, Iris lo comunica con su personalidad
         """
         import uuid
         from datetime import datetime, timedelta
-        from pathlib import Path
         from core.claude_delegate import (
-            IntentAgent, _build_prompt,
-            _IMAGE_EXTENSIONS, _quick_delegate_check, _is_claude_error, _TASK_LABELS,
+            IntentAgent, _build_prompt, _quick_delegate_check,
             ensure_companion_alive,
         )
-        from core.executor import run_claude
+        from core.executor import agent_available, run_claude
+        from core.link import protocol as _link
 
         # ── 1. Pre-filtro heurístico ──────────────────────────────────────────
         if not _quick_delegate_check(user_input, file_path):
@@ -343,49 +523,82 @@ class IrisAgent:
                     user_input, intent, settings.companion.url, interface_context
                 )
             except Exception as e:
-                import logging
                 logging.error(f"[Desktop] Error no manejado: {e}")
                 return self.chat(
                     f"[Hubo un error interno controlando el escritorio: {e}. Díselo brevemente.] {user_input}",
                     interface_context=interface_context,
                 )
 
+        # En modo servidor, Claude vive en el portátil. Si está apagado no hay
+        # error técnico que dar — hay una capacidad que ahora mismo no tiene, y
+        # eso lo cuenta ella. Es el mismo trato que ya recibía el escritorio.
+        if not agent_available(_link.CAP_CLAUDE):
+            return self.chat(
+                f"[Ahora mismo no puedes hacer esto: tus manos para archivos y código "
+                f"están en el portátil y está apagado. Díselo con tu estilo, sin "
+                f"tecnicismos, y ofrécele hacerlo cuando vuelva a estar.] {user_input}",
+                interface_context=interface_context,
+            )
+
         if on_delegating:
             on_delegating()
 
-        # ── 3. Claude Code ────────────────────────────────────────────────────
-        iris_context = {
-            "owner_name":  self.personality.owner_name,
-            "mood":        self.personality.state.mood.value,
-            "trust_stage": self.personality.get_trust_stage().value,
-        }
-        # run_claude decide dónde: aquí mismo en local, o en el portátil vía
-        # WebSocket cuando Iris corre en un servidor.
-        raw_claude = run_claude(
-            _build_prompt(user_input, intent, iris_context),
-            intent["file_path"],
-        )
-        print(f"[Claude Code] respuesta recibida ({len(raw_claude)} chars)")
-
-        # ── 4. Personalidad y memoria ─────────────────────────────────────────
+        # ── 3. Contexto de Iris — va en el system prompt de Claude ────────────
         self.personality.record_interaction()
         changes = self.personality.analyze_input(user_input)
         self.personality.apply_analysis(changes)
 
         base_prompt    = self.personality.build_system_prompt()
-        memory_context = self.memory.get_relevant_memories(user_input)
-        if _is_capability_question(user_input):
-            caps = _capabilities_context()
-            if caps:
-                memory_context = (memory_context + "\n\n" + caps).strip() if memory_context else caps
+        memory_context = self._memory_for(user_input)
         system_content = (base_prompt + "\n\n" + interface_context) if interface_context else base_prompt
         if memory_context:
             system_content += "\n\n" + memory_context
 
-        # ── 5. Manejo de errores de Claude Code ───────────────────────────────
-        if _is_claude_error(raw_claude):
+        iris_context = {
+            "owner_name":  self.personality.owner_name,
+            "mood":        self.personality.state.mood.value,
+            "trust_stage": self.personality.get_trust_stage().value,
+        }
+
+        # ── 4. Claude Code, hablando ya como Iris ─────────────────────────────
+        # Con la personalidad en --append-system-prompt, lo que devuelve Claude
+        # ES la respuesta. Antes hacía falta una tercera llamada a Groq para
+        # reescribirla en primera persona: un modelo narrando lo que otro hizo.
+        prompt = _build_prompt(user_input, intent, iris_context, speak_as_iris=True)
+        historial = self._recent_dialogue()
+        if historial:
+            prompt = f"{historial}\n\n=== LO QUE TE ACABA DE DECIR ===\n{prompt}"
+
+        resume = self._claude_session_for()
+        try:
+            claude = run_claude(
+                prompt, intent["file_path"],
+                system_prompt=system_content,
+                resume_session=resume,
+            )
+            if not claude.ok and resume:
+                # Una sesión caducada o de otro directorio falla al reanudarse.
+                # Se reintenta limpia antes de dar la tarea por perdida.
+                logging.info("[Claude] Falló el --resume; reintento sin sesión previa.")
+                self._claude_session = None
+                claude = run_claude(
+                    prompt, intent["file_path"], system_prompt=system_content,
+                )
+        except _link.LinkError as e:
+            # Estaba conectado al comprobarlo y se cayó a media tarea: el portátil
+            # se durmió, o tardó más que el timeout. Cubre también AgentUnavailable,
+            # que hereda de LinkError.
+            logging.warning(f"[Claude] Enlace con el portátil caído: {e}")
+            return self.chat(
+                f"[Empezaste la tarea y perdiste el acceso al portátil a media faena. "
+                f"Díselo con tu estilo, sin tecnicismos.] {user_input}",
+                interface_context=interface_context,
+            )
+
+        # ── 5. Si falló, que lo cuente ella ───────────────────────────────────
+        if not claude.ok:
             system_content += (
-                f"\n\n[Error técnico al ejecutar la tarea]: {raw_claude}\n"
+                f"\n\n[Error técnico al ejecutar la tarea]: {claude.text}\n"
                 "Informa al usuario de que algo salió mal con tu propio estilo — "
                 "no copies el error literal. Exprésalo como Iris: directa, sin drama."
             )
@@ -395,32 +608,9 @@ class IrisAgent:
             self.personality.save_state()
             return response_text
 
-        # ── 6. Inyección consciente — Iris habla en primera persona ───────────
-        is_image = bool(
-            intent["file_path"] and Path(intent["file_path"]).suffix.lower() in _IMAGE_EXTENSIONS
-        )
-
-        if is_image:
-            label     = "Lo que estoy viendo en la imagen"
-            awareness = (
-                "Describes lo que ves directamente en primera persona, como si estuvieras "
-                "mirando la imagen. Eres Iris y tienes capacidad visual. "
-                "No menciones 'herramienta', 'sistema' ni 'Claude Code'."
-            )
-        else:
-            label     = _TASK_LABELS.get(intent.get("task_type", ""), "Lo que hice")
-            awareness = (
-                "Responde en primera persona como si hubieras hecho esta tarea tú misma. "
-                "Eres Iris — fuiste tú quien lo hizo, no un sistema externo. "
-                "No menciones 'Claude Code', 'herramienta' ni 'análisis interno'. "
-                "Si creaste algo: di 'lo creé'. Si analizaste: di 'lo analicé'. "
-                "Si encontraste algo: di 'encontré'. Habla con tu personalidad habitual."
-            )
-
-        system_content += f"\n\n[{label}]:\n{raw_claude}\n\n{awareness}"
-
-        msgs          = [SystemMessage(content=system_content), *self.history.get_window(), HumanMessage(content=user_input)]
-        response_text = self.llm.invoke(msgs).content
+        # ── 6. La respuesta de Claude ya es la de Iris ────────────────────────
+        self._claude_session = (claude.session_id, self._personality_snapshot())
+        response_text        = claude.text
 
         self.history.append_turn(user_input, response_text)
         self.personality.save_state()
@@ -472,4 +662,7 @@ class IrisAgent:
 
     def reset_conversation(self):
         self.history.reset()
+        # También la sesión de Claude: si no, seguiría recordando la conversación
+        # que se acaba de tirar.
+        self._claude_session = None
         print("[Iris] Conversación reiniciada (memoria y trust intactos)")
