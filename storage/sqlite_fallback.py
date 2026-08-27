@@ -15,7 +15,13 @@ import chromadb
 from chromadb.utils import embedding_functions
 
 from config.settings import settings
-from storage.base import BaseHistoryStorage, BaseStateStorage, BaseVectorStorage
+from storage.base import (
+    BaseHistoryStorage,
+    BaseJournalStorage,
+    BasePreferenceStorage,
+    BaseStateStorage,
+    BaseVectorStorage,
+)
 
 
 # ─── SQLite History ───────────────────────────────────────────────────────────
@@ -94,6 +100,153 @@ class SQLiteStateStorage(BaseStateStorage):
         )
         row = cursor.fetchone()
         return json.loads(row[0]) if row else None
+
+
+# ─── SQLite Preferences ───────────────────────────────────────────────────────
+
+def _pref_row(row) -> dict:
+    return {
+        "subject":         row[0],
+        "kind":            row[1],
+        "valence":         row[2],
+        "strength":        row[3],
+        "formed_at":       row[4],
+        "last_reinforced": row[5],
+        "evidence":        json.loads(row[6]) if row[6] else [],
+    }
+
+
+class SQLitePreferenceStorage(BasePreferenceStorage):
+
+    def __init__(self, db_path: str = "data/iris.db"):
+        os.makedirs("data", exist_ok=True)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS iris_preferences (
+                subject         TEXT PRIMARY KEY,
+                kind            TEXT NOT NULL DEFAULT 'tema',
+                valence         REAL NOT NULL,
+                strength        REAL NOT NULL,
+                formed_at       TEXT NOT NULL,
+                last_reinforced TEXT NOT NULL,
+                evidence        TEXT NOT NULL DEFAULT '[]'
+            )
+        """)
+        self.conn.commit()
+
+    _COLS = "subject, kind, valence, strength, formed_at, last_reinforced, evidence"
+
+    def get_all(self) -> list[dict]:
+        cursor = self.conn.execute(
+            f"SELECT {self._COLS} FROM iris_preferences ORDER BY strength DESC"
+        )
+        return [_pref_row(r) for r in cursor.fetchall()]
+
+    def get(self, subject: str) -> Optional[dict]:
+        cursor = self.conn.execute(
+            f"SELECT {self._COLS} FROM iris_preferences WHERE subject = ?", (subject,)
+        )
+        row = cursor.fetchone()
+        return _pref_row(row) if row else None
+
+    def save(self, preference: dict) -> None:
+        now = datetime.now().isoformat()
+        self.conn.execute(
+            """
+            INSERT INTO iris_preferences
+                (subject, kind, valence, strength, formed_at, last_reinforced, evidence)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(subject) DO UPDATE SET
+                kind            = excluded.kind,
+                valence         = excluded.valence,
+                strength        = excluded.strength,
+                last_reinforced = excluded.last_reinforced,
+                evidence        = excluded.evidence
+            """,
+            (
+                preference["subject"],
+                preference.get("kind", "tema"),
+                float(preference["valence"]),
+                float(preference["strength"]),
+                preference.get("formed_at") or now,
+                now,
+                json.dumps(preference.get("evidence", [])),
+            ),
+        )
+        self.conn.commit()
+
+    def delete(self, subject: str) -> None:
+        self.conn.execute("DELETE FROM iris_preferences WHERE subject = ?", (subject,))
+        self.conn.commit()
+
+    def count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM iris_preferences").fetchone()[0]
+
+
+# ─── SQLite Journal ───────────────────────────────────────────────────────────
+
+def _journal_row(row) -> dict:
+    return {
+        "id":      row[0],
+        "at":      row[1],
+        "kind":    row[2],
+        "content": row[3],
+        "shared":  bool(row[4]),
+        "impulse": row[5],
+    }
+
+
+class SQLiteJournalStorage(BaseJournalStorage):
+
+    def __init__(self, db_path: str = "data/iris.db"):
+        os.makedirs("data", exist_ok=True)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS iris_journal (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                at      TEXT NOT NULL,
+                kind    TEXT NOT NULL,
+                content TEXT NOT NULL,
+                shared  INTEGER NOT NULL DEFAULT 0,
+                impulse REAL NOT NULL DEFAULT 0.0
+            )
+        """)
+        self.conn.commit()
+
+    _COLS = "id, at, kind, content, shared, impulse"
+
+    def add(self, kind: str, content: str, impulse: float = 0.0) -> int:
+        cursor = self.conn.execute(
+            "INSERT INTO iris_journal (at, kind, content, impulse) VALUES (?, ?, ?, ?)",
+            (datetime.now().isoformat(), kind, content, float(impulse)),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def recent(self, n: int) -> list[dict]:
+        cursor = self.conn.execute(
+            f"SELECT {self._COLS} FROM iris_journal ORDER BY at DESC LIMIT ?", (n,)
+        )
+        return [_journal_row(r) for r in cursor.fetchall()]
+
+    def top_unshared(self) -> Optional[dict]:
+        cursor = self.conn.execute(
+            f"""
+            SELECT {self._COLS} FROM iris_journal
+            WHERE shared = 0
+            ORDER BY impulse DESC, at DESC
+            LIMIT 1
+            """
+        )
+        row = cursor.fetchone()
+        return _journal_row(row) if row else None
+
+    def mark_shared(self, entry_id: int) -> None:
+        self.conn.execute("UPDATE iris_journal SET shared = 1 WHERE id = ?", (entry_id,))
+        self.conn.commit()
+
+    def count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM iris_journal").fetchone()[0]
 
 
 # ─── ChromaDB Vector ──────────────────────────────────────────────────────────

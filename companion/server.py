@@ -6,11 +6,13 @@ Corre en Python NATIVO de Windows (no WSL2).
 Iris lo llama desde WSL2 vía HTTP a localhost:7891.
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 import uvicorn
 
+from auth import TOKEN_HEADER, load_or_create_token
 from screen import take_screenshot, get_ui_elements
 from control import (
     click, double_click, right_click, move, drag,
@@ -19,6 +21,20 @@ from control import (
 
 app  = FastAPI(title="Iris Desktop Companion")
 PORT = 7891
+
+TOKEN = load_or_create_token()
+
+# Todo lo que hay debajo mueve el ratón, escribe con el teclado, captura la
+# pantalla o lanza programas. Sin esto, cualquiera en la red hace lo mismo.
+_OPEN_PATHS = {"/health"}
+
+
+@app.middleware("http")
+async def require_token(request: Request, call_next):
+    if request.url.path not in _OPEN_PATHS:
+        if request.headers.get(TOKEN_HEADER, "") != TOKEN:
+            return JSONResponse({"detail": "token invalido o ausente"}, status_code=401)
+    return await call_next(request)
 
 
 # ── Modelos ───────────────────────────────────────────────────────────────────
@@ -132,4 +148,5 @@ def do_launch(req: LaunchReq):
 
 if __name__ == "__main__":
     print(f"[Companion] Iris Desktop Companion corriendo en http://0.0.0.0:{PORT}")
+    print(f"[Companion] Autenticacion activa — token en {TOKEN_HEADER}")
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning")

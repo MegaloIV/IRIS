@@ -37,6 +37,12 @@ def handle_command(cmd: str, iris) -> str:
                     content    = (m['content'][:30] + '..') if len(m['content']) > 30 else m['content']
                     out.append(f" {i}. [{category}] {content} {importance}")
 
+        case "/gustos":
+            # Ventana a las preferencias que se están formando. Todavía NO
+            # influyen en cómo responde Iris — esto es para calibrar el prompt
+            # de extracción antes de conectarlas al system prompt.
+            out.append(iris.preferences.summary())
+
         case "/guardar":
             out.append("Forzando extracción...")
             iris.memory.force_close_session()

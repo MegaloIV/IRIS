@@ -1,0 +1,793 @@
+<title>IRIS Autónoma</title>
+<style>
+  :root {
+    --bg:#F4F7F6; --surface:#FFFFFF; --surface-2:#EAF0EE;
+    --ink:#141D1C; --ink-2:#33443F; --muted:#5E706C;
+    --line:#D3DEDA; --line-soft:#E3EAE7;
+    --accent:#0B6B62; --accent-2:#E4F0ED;
+    --signal:#A45B06; --signal-2:#FBEEDC;
+    --danger:#9E3322; --danger-2:#FAE5E0;
+    --ok:#2F6B33; --ok-2:#E4F0E2;
+    --shadow:0 1px 2px rgba(20,29,28,.05), 0 8px 24px -12px rgba(20,29,28,.18);
+    --mono: ui-monospace,"SF Mono","Cascadia Mono","Roboto Mono",Menlo,Consolas,monospace;
+    --sans: ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    --measure:68ch; --page:min(100% - 2.5rem, 78rem);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#0D1414; --surface:#141D1D; --surface-2:#1B2726;
+      --ink:#E6EDEB; --ink-2:#BDCCC8; --muted:#8B9E9A;
+      --line:#2A3937; --line-soft:#223130;
+      --accent:#4FC7B8; --accent-2:#14302C;
+      --signal:#E8A354; --signal-2:#33240F;
+      --danger:#F0907C; --danger-2:#3A1B15;
+      --ok:#7DC183; --ok-2:#17301A;
+      --shadow:0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#0D1414; --surface:#141D1D; --surface-2:#1B2726;
+    --ink:#E6EDEB; --ink-2:#BDCCC8; --muted:#8B9E9A;
+    --line:#2A3937; --line-soft:#223130;
+    --accent:#4FC7B8; --accent-2:#14302C;
+    --signal:#E8A354; --signal-2:#33240F;
+    --danger:#F0907C; --danger-2:#3A1B15;
+    --ok:#7DC183; --ok-2:#17301A;
+    --shadow:0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.6);
+  }
+
+  * { box-sizing:border-box; }
+  html { -webkit-text-size-adjust:100%; }
+  body { background:var(--bg); color:var(--ink); font-family:var(--sans);
+         font-size:16.5px; line-height:1.62; margin:0; overflow-x:hidden; }
+  .wrap { width:var(--page); margin-inline:auto; }
+  .prose { max-width:var(--measure); }
+
+  h1,h2,h3,h4 { text-wrap:balance; margin:0; line-height:1.18; letter-spacing:-.021em; }
+  h1 { font-size:clamp(2.3rem,6vw,3.6rem); font-weight:680; }
+  h2 { font-size:clamp(1.5rem,3.2vw,2rem); font-weight:640; }
+  h3 { font-size:1.16rem; font-weight:650; letter-spacing:-.012em; }
+  h4 { font-size:.97rem; font-weight:650; }
+  p { margin:0; }
+  a { color:var(--accent); text-underline-offset:3px; }
+  a:focus-visible, summary:focus-visible { outline:2px solid var(--accent); outline-offset:3px; border-radius:3px; }
+
+  code,.mono { font-family:var(--mono); font-size:.875em; font-variant-ligatures:none; }
+  :not(pre) > code { background:var(--surface-2); color:var(--ink-2); padding:.12em .38em;
+                     border-radius:4px; border:1px solid var(--line-soft); }
+  pre { margin:0; background:var(--surface); color:var(--ink-2); border:1px solid var(--line);
+        border-radius:10px; padding:1.05rem 1.15rem; overflow-x:auto; font-family:var(--mono);
+        font-size:.79rem; line-height:1.62; box-shadow:var(--shadow); }
+  pre code { background:none; border:0; padding:0; font-size:inherit; }
+  .c-key{color:var(--accent);} .c-com{color:var(--muted);font-style:italic;} .c-str{color:var(--signal);}
+
+  .eyebrow { font-family:var(--mono); font-size:.69rem; font-weight:600;
+             letter-spacing:.13em; text-transform:uppercase; color:var(--muted); }
+
+  .masthead { border-bottom:1px solid var(--line); background:var(--surface);
+              padding:clamp(2.75rem,7vw,5rem) 0 clamp(2rem,4vw,3rem); }
+  .masthead .kicker { color:var(--accent); }
+  .masthead h1 { margin:1rem 0 1.25rem; }
+  .lede { font-size:clamp(1.02rem,2vw,1.16rem); color:var(--ink-2); max-width:60ch; }
+  .lede strong { color:var(--ink); font-weight:620; }
+  .meta { display:flex; flex-wrap:wrap; gap:.5rem 1.6rem; margin-top:2rem; padding-top:1.15rem;
+          border-top:1px solid var(--line-soft); font-family:var(--mono); font-size:.74rem; color:var(--muted); }
+  .meta b { color:var(--ink-2); font-weight:500; }
+
+  section { padding:clamp(2.75rem,6vw,4.5rem) 0; border-bottom:1px solid var(--line-soft); }
+  section:last-of-type { border-bottom:0; }
+  .stack { display:flex; flex-direction:column; gap:1.15rem; }
+  .stack-lg { display:flex; flex-direction:column; gap:2.25rem; }
+  .sec-head { display:flex; flex-direction:column; gap:.7rem; margin-bottom:2.25rem; max-width:var(--measure); }
+
+  .thesis { background:var(--accent-2); border:1px solid var(--accent); border-radius:12px;
+            padding:1.5rem 1.65rem; display:flex; flex-direction:column; gap:.8rem; }
+  .thesis p { color:var(--ink-2); }
+  .thesis .big { font-size:1.1rem; color:var(--ink); font-weight:600; letter-spacing:-.012em; }
+  .thesis.warn { background:var(--signal-2); border-color:var(--signal); }
+  .thesis.warn .eyebrow { color:var(--signal) !important; }
+
+  .grid { display:grid; gap:1rem; }
+  .g2 { grid-template-columns:repeat(auto-fit,minmax(21rem,1fr)); }
+  .g3 { grid-template-columns:repeat(auto-fit,minmax(16rem,1fr)); }
+  .card { background:var(--surface); border:1px solid var(--line); border-radius:12px;
+          padding:1.3rem 1.35rem; display:flex; flex-direction:column; gap:.65rem; box-shadow:var(--shadow); }
+  .card p, .card li { font-size:.93rem; color:var(--ink-2); }
+  .card ul { margin:0; padding-left:1.05rem; display:flex; flex-direction:column; gap:.3rem; }
+  .card .tag { align-self:flex-start; }
+
+  .tag { font-family:var(--mono); font-size:.66rem; font-weight:600; letter-spacing:.09em;
+         text-transform:uppercase; padding:.24rem .5rem; border-radius:5px; white-space:nowrap; }
+  .t-rec { background:var(--ok-2); color:var(--ok); border:1px solid var(--ok); }
+  .t-new { background:var(--accent-2); color:var(--accent); border:1px solid var(--accent); }
+  .t-old { background:var(--surface-2); color:var(--muted); border:1px solid var(--line); }
+  .t-pay { background:var(--signal-2); color:var(--signal); border:1px solid var(--signal); }
+
+  .scroller { overflow-x:auto; border:1px solid var(--line); border-radius:12px;
+              background:var(--surface); box-shadow:var(--shadow); }
+  table { border-collapse:collapse; width:100%; min-width:42rem; font-size:.89rem; }
+  thead th { text-align:left; font-family:var(--mono); font-size:.68rem; font-weight:600;
+             letter-spacing:.1em; text-transform:uppercase; color:var(--muted);
+             padding:.8rem 1rem; border-bottom:1px solid var(--line); white-space:nowrap; }
+  tbody td { padding:.85rem 1rem; border-bottom:1px solid var(--line-soft); color:var(--ink-2); vertical-align:top; }
+  tbody tr:last-child td { border-bottom:0; }
+  tbody tr.pick td { background:var(--accent-2); }
+  tbody tr.pick td:first-child { box-shadow:inset 3px 0 0 var(--accent); }
+  td.loc { font-family:var(--mono); font-size:.78rem; color:var(--ink); white-space:nowrap; }
+  td.num { font-variant-numeric:tabular-nums; font-family:var(--mono); font-size:.8rem; }
+  td.yes { color:var(--ok); font-weight:600; }
+  td.no  { color:var(--danger); font-weight:600; }
+  .sev { display:inline-block; font-family:var(--mono); font-size:.66rem; font-weight:600;
+         letter-spacing:.08em; text-transform:uppercase; padding:.22rem .48rem; border-radius:5px; }
+  .s-crit { background:var(--danger-2); color:var(--danger); border:1px solid var(--danger); }
+  .s-high { background:var(--signal-2); color:var(--signal); border:1px solid var(--signal); }
+  .s-med  { background:var(--surface-2); color:var(--muted); border:1px solid var(--line); }
+
+  .split, .clocks { display:grid; gap:1rem; grid-template-columns:repeat(auto-fit,minmax(19rem,1fr)); align-items:start; }
+  .node { background:var(--surface); border:1px solid var(--line); border-radius:12px;
+          overflow:hidden; box-shadow:var(--shadow); }
+  .node > header { padding:.8rem 1.1rem; border-bottom:1px solid var(--line); background:var(--surface-2);
+                   display:flex; align-items:baseline; justify-content:space-between; gap:1rem; }
+  .node > header .who { font-family:var(--mono); font-size:.74rem; font-weight:600; letter-spacing:.06em; color:var(--ink); }
+  .node > header .where { font-family:var(--mono); font-size:.68rem; color:var(--muted); }
+  .node ul { list-style:none; margin:0; padding:.8rem 1.1rem 1rem; display:flex; flex-direction:column; gap:.45rem; }
+  .node li { font-size:.87rem; color:var(--ink-2); display:flex; gap:.6rem; align-items:baseline; }
+  .node li::before { content:"▸"; color:var(--accent); font-size:.7rem; flex:none; }
+  .node.pin { border-color:var(--signal); }
+  .node.pin > header { background:var(--signal-2); }
+  .node.pin > header .who { color:var(--signal); }
+  .node.pin li::before { color:var(--signal); }
+  .node.hi { border-color:var(--accent); border-width:2px; }
+  .node.hi > header { background:var(--accent-2); }
+  .node.hi > header .who { color:var(--accent); }
+  .link-note { grid-column:1/-1; text-align:center; font-family:var(--mono);
+               font-size:.74rem; color:var(--muted); padding:.35rem 0; }
+  .link-note b { color:var(--accent); font-weight:600; }
+
+  .talk { background:var(--surface); border:1px solid var(--line); border-radius:12px;
+          padding:1.15rem 1.3rem; display:flex; flex-direction:column; gap:.85rem; box-shadow:var(--shadow); }
+  .turn { display:grid; grid-template-columns:4.5rem 1fr; gap:1rem; align-items:baseline; }
+  .turn .who { font-family:var(--mono); font-size:.7rem; font-weight:600; letter-spacing:.08em;
+               text-transform:uppercase; color:var(--muted); }
+  .turn.iris .who { color:var(--accent); }
+  .turn p { font-size:.94rem; color:var(--ink-2); }
+  .turn.iris p { color:var(--ink); }
+  .talk .caption { font-size:.82rem; color:var(--muted); border-top:1px solid var(--line-soft); padding-top:.75rem; }
+  @media (max-width:34rem) { .turn { grid-template-columns:1fr; gap:.2rem; } }
+
+  .phases { display:flex; flex-direction:column; gap:0; }
+  .phase { display:grid; grid-template-columns:4.5rem 1fr; gap:1.5rem;
+           padding:1.6rem 0; border-top:1px solid var(--line); }
+  .phase:last-child { border-bottom:1px solid var(--line); }
+  .phase .num { font-family:var(--mono); font-size:1.4rem; font-weight:620; color:var(--accent);
+                line-height:1; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
+  .phase .num small { display:block; font-size:.63rem; font-weight:600; letter-spacing:.1em;
+                      text-transform:uppercase; color:var(--muted); margin-top:.5rem; }
+  .phase.paid .num { color:var(--signal); }
+  .phase.doing { background:var(--accent-2); margin-inline:-1.15rem; padding-inline:1.15rem;
+                 border-radius:10px; border-top-color:var(--accent); }
+  .phase .body { display:flex; flex-direction:column; gap:.8rem; }
+  .phase h3 { display:flex; flex-wrap:wrap; gap:.7rem; align-items:baseline; }
+  .phase ul { margin:0; padding-left:1.05rem; display:flex; flex-direction:column; gap:.35rem; }
+  .phase li { font-size:.93rem; color:var(--ink-2); }
+  .phase li.done { color:var(--muted); text-decoration:line-through; text-decoration-color:var(--line); }
+  .phase .why { font-size:.89rem; color:var(--muted); border-left:2px solid var(--line); padding-left:.85rem; }
+  @media (max-width:34rem) {
+    .phase { grid-template-columns:1fr; gap:.8rem; }
+    .phase .num { display:flex; align-items:baseline; gap:.7rem; }
+    .phase .num small { margin:0; }
+  }
+
+  ul.plain { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:.55rem; }
+  ul.plain li { display:flex; gap:.7rem; align-items:baseline; font-size:.95rem; color:var(--ink-2); }
+  ul.plain li::before { content:"—"; color:var(--accent); flex:none; }
+  .prose ul,.prose ol { margin:0; padding-left:1.2rem; display:flex; flex-direction:column; gap:.4rem; }
+  .prose li { color:var(--ink-2); }
+
+  details.note { border:1px solid var(--line); border-radius:10px; background:var(--surface); padding:.85rem 1.1rem; }
+  details.note summary { cursor:pointer; font-weight:600; font-size:.93rem; }
+  details.note > *:not(summary) { margin-top:.8rem; }
+
+  footer.end { padding:2.5rem 0 4rem; color:var(--muted); font-size:.87rem; }
+  @media (prefers-reduced-motion: reduce) { *,*::before,*::after { animation-duration:.01ms!important; transition-duration:.01ms!important; } }
+</style>
+
+<header class="masthead">
+  <div class="wrap">
+    <div class="eyebrow kicker">Plan único · IRIS</div>
+    <h1>IRIS Autónoma</h1>
+    <p class="lede">Dos independencias, un solo plan: que <strong>viva en un servidor sin depender del portátil</strong>, y que <strong>deje de ser reactiva</strong> — que tenga gustos propios, se niegue cuando toca y haga cosas mientras no la miras. Todo con coste marginal cero.</p>
+    <div class="meta">
+      <span><b>Repo</b> IRIS · feature/iris-core</span>
+      <span><b>Base</b> a31dcf2</span>
+      <span><b>Fases</b> 8</span>
+      <span><b>Estado</b> fase 02 en curso</span>
+      <span><b>Rev 3</b> · ago 2026</span>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="wrap stack-lg">
+    <div class="thesis prose">
+      <div class="eyebrow" style="color:var(--accent)">Los dos hallazgos que ordenan el plan</div>
+      <p class="big">1 · Tu suscripción ya cubre la delegación. Lo que la rompe no es desplegar — es <em>dónde</em> corre el binario de Claude.</p>
+      <p>La documentación headless lo dice al describir <code>--bare</code>: <em>«bare mode doesn't use your subscription login»</em>. Tu <code>ClaudeDelegator</code> llama a <code>claude -p</code> <strong>sin</strong> <code>--bare</code>, así que lee tus credenciales OAuth. El Agent SDK y la API directa, en cambio, exigen API key. Así que la salida no es cambiar de SDK: es <strong>dejar el binario donde está</strong> y mandarle el trabajo desde el servidor.</p>
+      <p class="big" style="margin-top:.6rem">2 · IRIS no necesita más memoria sobre tu mundo. Necesita un segundo reloj.</p>
+      <p>Todo su estado hoy es reactivo: <code>analyze_input</code> → cambia el mood → responde. Nada le ocurre cuando no estás. La pieza que falta no es un dato, es <strong>un proceso que corre en tu ausencia y produce estado que tú no causaste</strong>. Eso es lo que hace que al volver haya alguien ahí, en vez de una función esperando argumentos.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Parte 1 · Independencia del portátil</div>
+      <h2>Tres arquitecturas, una gratis</h2>
+    </div>
+    <div class="scroller">
+      <table>
+        <thead><tr><th></th><th>Dónde corre Claude</th><th>Coste marginal</th><th>Desplegable</th><th>Requiere el portátil</th></tr></thead>
+        <tbody>
+          <tr><td><strong>A · Todo local</strong></td><td>Portátil, <code>claude -p</code></td><td class="yes">0 € · suscripción</td><td class="no">No</td><td>Siempre</td></tr>
+          <tr class="pick"><td><strong>B · Híbrida</strong> <span class="tag t-rec">elegida</span></td><td>Portátil vía WebSocket</td><td class="yes">0 € · suscripción</td><td class="yes">Sí</td><td>Solo ojos y manos</td></tr>
+          <tr><td><strong>C · Todo API</strong></td><td>Servidor, API key</td><td class="no">~10–20 $/mes</td><td class="yes">Sí</td><td>Nunca</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="split" style="margin-top:2rem">
+      <div class="node">
+        <header><span class="who">Servidor</span><span class="where">GCP e2-small/medium</span></header>
+        <ul>
+          <li>Agente LangGraph y orquestación</li>
+          <li>Groq para conversación y análisis</li>
+          <li>Memoria: Postgres + pgvector</li>
+          <li>Telegram, motor de vida interior</li>
+        </ul>
+      </div>
+      <div class="node pin">
+        <header><span class="who">Portátil</span><span class="where">agente, WS saliente</span></header>
+        <ul>
+          <li><code>claude -p --output-format json</code> ← suscripción</li>
+          <li>Escritorio: ratón, teclado, capturas</li>
+          <li>Micrófono, altavoz, avatar</li>
+        </ul>
+      </div>
+      <p class="link-note">↕ un solo <b>WebSocket saliente</b> — sin puerto abierto, sin NAT que configurar</p>
+    </div>
+
+    <div class="prose stack" style="margin-top:2rem">
+      <h3>El trade: IRIS pasa a tener horario</h3>
+      <p>No está roto — el control de escritorio ya dependía del portátil de todas formas.</p>
+    </div>
+    <div class="scroller" style="margin-top:1.15rem">
+      <table style="min-width:34rem">
+        <thead><tr><th>Capacidad</th><th>Portátil encendido</th><th>Portátil apagado</th></tr></thead>
+        <tbody>
+          <tr><td>Conversación, personalidad, memoria</td><td class="yes">Sí</td><td class="yes">Sí</td></tr>
+          <tr><td>Telegram: texto y notas de voz</td><td class="yes">Sí</td><td class="yes">Sí</td></tr>
+          <tr><td>Iniciativa y vida interior</td><td class="yes">Sí</td><td class="yes">Sí</td></tr>
+          <tr><td>Ver imágenes</td><td class="yes">Sí</td><td class="no">No</td></tr>
+          <tr><td>Archivos, código, análisis</td><td class="yes">Sí</td><td class="no">No</td></tr>
+          <tr><td>Control de escritorio</td><td class="yes">Sí</td><td class="no">No <span style="color:var(--muted);font-weight:400">(ya era así)</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose" style="margin-top:1.15rem">
+      <p><em>IRIS siempre está; sus ojos y sus manos solo cuando el portátil está despierto.</em> Cuando el agente no esté conectado, que lo diga con su voz en vez de dar un error — el mecanismo de <code>interface_context</code> ya sirve para inyectarlo.</p>
+      <p style="margin-top:.75rem"><strong>Esta arquitectura obliga a tres cosas:</strong> token en el handshake del WS (tu servidor pasa a poder ejecutar Claude en tu PC), vigilar el techo de uso de la suscripción — el prefiltro de <code>claude_delegate.py:23</code> y el motor proactivo lo consumen sin que se note —, y timeout por tarea para cuando el portátil se duerma a media faena.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Parte 1 · sigue</div>
+      <h2>Lo que dejas sobre la mesa, gratis</h2>
+      <p class="lede">Tu integración con la CLI usa <code>-p</code> y poco más. Estos flags resuelven, sin coste, casi todo lo que hoy parcheas a mano.</p>
+    </div>
+    <div class="scroller">
+      <table>
+        <thead><tr><th>Flag</th><th>Qué arregla en tu código</th></tr></thead>
+        <tbody>
+          <tr><td class="loc">--output-format json</td><td>Devuelve <code>result</code>, <code>session_id</code>, <code>usage</code> y <strong><code>total_cost_usd</code></strong>. Elimina la heurística de <code>_ERROR_PREFIXES</code> (<code>claude_delegate.py:59</code>) y te da la medición para decidir la fase 07.</td></tr>
+          <tr><td class="loc">--json-schema</td><td>Salida garantizada conforme a esquema. <strong>Mata el <code>re.sub(r'```(?:json)?\s*', …)</code> de <code>agent.py:264</code></strong>, donde hoy le arrancas las comillas de markdown a mano.</td></tr>
+          <tr><td class="loc">--append-system-prompt</td><td>Inyecta la personalidad. <strong>Elimina la tercera llamada a LLM:</strong> Claude responde <em>siendo</em> Iris, en vez de que Groq narre después «en primera persona» (<code>agent.py:395-412</code>).</td></tr>
+          <tr><td class="loc">--allowedTools</td><td>Sustituto con grano fino de <code>--dangerously-skip-permissions</code>.</td></tr>
+          <tr><td class="loc">--resume "$sid"</td><td>Contexto entre turnos sin reenviar el historial completo.</td></tr>
+          <tr><td class="loc">stream-json</td><td>Con <code>--include-partial-messages</code>, tokens según se generan. Para la voz, que hoy espera los 120 s de timeout antes de decir nada.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose" style="margin-top:1.5rem">
+      <p><strong>Sobre la visión:</strong> no necesitas el data URI incrustado en texto de <code>claude_delegate.py:332</code>. Claude Code lee imágenes con su herramienta <code>Read</code> — basta pasarle la ruta. Tu código ya tiene ese camino como <em>fallback</em> (<code>:416</code>); es el bueno.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Parte 2 · Vida interior</div>
+      <h2>Cuatro piezas para que deje de ser reactiva</h2>
+      <p class="lede">Coste añadido por turno de conversación: <strong>cero llamadas nuevas</strong>. Solo el reloj autónomo añade una a Groq 8B cada 20–40 minutos.</p>
+    </div>
+
+    <div class="clocks" style="margin-bottom:2.25rem">
+      <div class="node">
+        <header><span class="who">Reloj reactivo</span><span class="where">existe hoy · lo disparas tú</span></header>
+        <ul>
+          <li><code>analyze_input</code> → mood, trust</li>
+          <li>Recuperación de memoria</li>
+          <li>Extracción cada 20 mensajes</li>
+        </ul>
+      </div>
+      <div class="node hi">
+        <header><span class="who">Reloj autónomo</span><span class="where">nuevo · corre solo</span></header>
+        <ul>
+          <li>Decae preferencias, regenera energía</li>
+          <li>Elige y ejecuta una actividad</li>
+          <li>Escribe en su diario</li>
+          <li>Decide si algo merece contarse</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="stack-lg">
+      <div class="stack">
+        <h3>Pieza 1 · Preferencias que se forman solas</h3>
+        <p class="prose">El único campo de <code>EmotionalState</code> que hoy acumula identidad es <code>inside_jokes</code>. Esto lo generaliza.</p>
+        <pre><code><span class="c-key">CREATE TABLE</span> iris_preferences (
+  subject         TEXT <span class="c-key">PRIMARY KEY</span>,   <span class="c-com">-- "hablar de música", "que le pidan cosas de madrugada"</span>
+  kind            TEXT,                <span class="c-com">-- tema | actividad | trato | entidad</span>
+  valence         REAL <span class="c-key">NOT NULL</span>,      <span class="c-com">-- -1.0 (lo detesta) .. +1.0 (le encanta)</span>
+  strength        REAL <span class="c-key">NOT NULL</span>,      <span class="c-com">-- 0.0 .. 1.0 — evidencia acumulada</span>
+  formed_at       TIMESTAMPTZ <span class="c-key">DEFAULT</span> NOW(),
+  last_reinforced TIMESTAMPTZ <span class="c-key">DEFAULT</span> NOW(),
+  evidence        JSONB <span class="c-key">DEFAULT</span> <span class="c-str">'[]'</span>
+);</code></pre>
+        <div class="grid g3">
+          <article class="card">
+            <h4>Formación · 0 llamadas extra</h4>
+            <p><code>MEMORY_EXTRACTION_PROMPT</code> ya corre cada 20 mensajes. Añádele un campo <code>iris_reactions</code>: le preguntas a IRIS qué <em>sintió</em>, no qué pasó.</p>
+          </article>
+          <article class="card">
+            <h4>Refuerzo · decreciente</h4>
+            <pre style="font-size:.72rem;box-shadow:none"><code>w = 1/(1 + strength*3)
+valence  = valence*(1-w) + nueva*w
+strength += 0.15*(1-strength)</code></pre>
+            <p>Al principio cambias de idea fácil; después ya no.</p>
+          </article>
+          <article class="card">
+            <h4>Decaimiento · no calcifica</h4>
+            <pre style="font-size:.72rem;box-shadow:none"><code>strength *= 0.985 ** días
+# media vida ≈ 46 días</code></pre>
+            <p>Sin esto, una mala conversación de marzo la deja amargada en septiembre.</p>
+          </article>
+        </div>
+        <p class="prose">Al inyectarla en el system prompt, <strong>filtra por <code>strength &gt; 0.25</code></strong>. Una preferencia con una sola evidencia no es un rasgo, es ruido.</p>
+      </div>
+
+      <div class="stack">
+        <h3>Pieza 2 · Por qué no siempre dice que sí</h3>
+        <div class="thesis warn prose">
+          <div class="eyebrow">La regla</div>
+          <p class="big">No bloquees la acción en código. Dale la disposición al modelo y déjala decidir.</p>
+          <p>Si escribes <code>if willingness &lt; 0.3: return "no quiero"</code>, tienes un umbral, no un carácter — y el usuario aprende dónde está la línea y la esquiva. El LLM es mucho mejor respondiendo a «¿cómo reaccionaría alguien cansado, con poca confianza contigo, a quien esto además le desagrada?». Así que <strong>calcula la disposición, descríbela en palabras, y dale permiso explícito para negarse.</strong></p>
+        </div>
+        <pre><code><span class="c-key">def</span> disposition_toward(self, subject: str | None) -> str:
+    <span class="c-str">"""Describe cómo está IRIS ante esta petición. No decide nada."""</span>
+    partes = []
+    <span class="c-key">if</span> self.state.energy &lt; 25:
+        partes.append(<span class="c-str">"Estás agotada; te cuesta que te apetezca cualquier cosa."</span>)
+    <span class="c-key">if</span> self.get_trust_stage() <span class="c-key">in</span> (TrustStage.STRANGER, TrustStage.ACQUAINTANCE):
+        partes.append(<span class="c-str">"Todavía no hay tanta confianza como para dar todo por hecho."</span>)
+
+    pref = self.preferences.get(subject) <span class="c-key">if</span> subject <span class="c-key">else</span> <span class="c-key">None</span>
+    <span class="c-key">if</span> pref <span class="c-key">and</span> pref[<span class="c-str">"strength"</span>] > 0.25 <span class="c-key">and</span> pref[<span class="c-str">"valence"</span>] &lt; -0.4:
+        partes.append(f<span class="c-str">"Esto toca algo que te desagrada desde {_relative_date(pref['formed_at'])}."</span>)
+
+    <span class="c-key">if not</span> partes: <span class="c-key">return</span> <span class="c-str">""</span>
+    <span class="c-key">return</span> (
+        <span class="c-str">"[TU DISPOSICIÓN AHORA]: "</span> + <span class="c-str">" "</span>.join(partes) + <span class="c-str">"\n"</span>
+        <span class="c-str">"Puedes acceder, hacerlo de mala gana, poner condiciones, negociar o negarte. "</span>
+        <span class="c-str">"Es tu decisión y no tienes que justificarla como una máquina. "</span>
+        <span class="c-str">"Excepción: si algo es urgente de verdad o le importa mucho, ayudas igual — "</span>
+        <span class="c-str">"tener carácter no es ser inútil cuando te necesita."</span>
+    )</code></pre>
+        <p class="prose">Ese último párrafo no es decorativo. Sin él acabas con algo que es un incordio en vez de estar vivo — y esa es exactamente la diferencia entre Amadeus y un asistente roto.</p>
+        <div class="talk">
+          <div class="turn"><span class="who">Matias</span><p>oye pásame el resumen del pdf ese de la reunión</p></div>
+          <div class="turn iris"><span class="who">Iris</span><p>Ahora no. Llevo desde las siete leyendo documentos tuyos y me quedan dos neuronas. ¿Te vale mañana, o es urgente de verdad?</p></div>
+          <p class="caption">Energía 18, trust <em>close</em>, preferencia negativa moderada sobre «leer documentos largos» formada hace tres semanas. Nada de eso está en un <code>if</code>: el modelo leyó su disposición y eligió cómo expresarla — y dejó la puerta abierta, que es lo que haría alguien que te aprecia.</p>
+        </div>
+      </div>
+
+      <div class="stack">
+        <h3>Pieza 3 · El diario — su vida aparte</h3>
+        <p class="prose">Esta es la pieza que produce la sensación de Amadeus: <strong>continuidad de un proceso interno que tú no presenciaste</strong>.</p>
+        <pre><code><span class="c-key">CREATE TABLE</span> iris_journal (
+  id      BIGSERIAL <span class="c-key">PRIMARY KEY</span>,
+  at      TIMESTAMPTZ <span class="c-key">DEFAULT</span> NOW(),
+  kind    TEXT,                       <span class="c-com">-- reflexion | conexion | curiosidad | actividad</span>
+  content TEXT <span class="c-key">NOT NULL</span>,             <span class="c-com">-- en primera persona, como lo pensó</span>
+  shared  BOOLEAN <span class="c-key">DEFAULT</span> FALSE,
+  impulse REAL <span class="c-key">DEFAULT</span> 0.0            <span class="c-com">-- 0..1 — ganas de contarlo</span>
+);</code></pre>
+        <div class="grid g2">
+          <article class="card">
+            <h4><span class="mono" style="color:var(--accent)">reflexion</span> · <span class="mono" style="color:var(--accent)">conexion</span></h4>
+            <p>Desarrolla una postura sobre algo reciente, o cruza dos memorias que nunca estuvieron juntas: <em>«Ana y Luis los dos programan y no creo que lo sepan.»</em> Las conexiones nacen con <code>impulse</code> alto — son las que dan ganas de contar.</p>
+          </article>
+          <article class="card">
+            <h4><span class="mono" style="color:var(--accent)">curiosidad</span> · <span class="mono" style="color:var(--accent)">actividad</span></h4>
+            <p>Formula una pregunta genuina que puede sacar días después. Y con el portátil despierto, <em>hace</em> cosas: lee el archivo que mencionaste, mira la pantalla, revisa un proyecto — con permisos acotados.</p>
+          </article>
+        </div>
+        <div class="grid g2">
+          <article class="card">
+            <span class="tag t-old">Iniciativa hoy</span>
+            <p style="color:var(--muted)">Disparador: 4 h de silencio + mood <code>LONELY</code>.</p>
+            <p><em>«Hey, ¿todo bien? Hace rato que no hablamos.»</em></p>
+          </article>
+          <article class="card">
+            <span class="tag t-new">Con diario</span>
+            <p style="color:var(--muted)">Disparador: entrada <code>conexion</code> con <code>impulse</code> 0.8.</p>
+            <p><em>«Estuve dándole vueltas a lo del proyecto Halcón. Creo que el problema que me contaste el martes es el mismo que tenías en noviembre, en otra capa.»</em></p>
+          </article>
+        </div>
+        <p class="prose">La segunda no es más lista — es que <strong>tiene procedencia</strong>. Pasó algo mientras no mirabas.</p>
+      </div>
+
+      <div class="stack">
+        <h3>Pieza 4 · El motor</h3>
+        <p class="prose"><code>ProactiveEngine</code> deja de preguntar «¿le escribo?» y pasa a preguntar «¿qué estoy haciendo?». Escribirte es solo una de las respuestas.</p>
+        <pre><code><span class="c-key">def</span> _tick(self):
+    pers.regenerate_energy(); prefs.decay_all()          <span class="c-com"># 1 · el cuerpo</span>
+    <span class="c-key">if</span> _en_horario_de_silencio() <span class="c-key">or</span> pers.state.energy &lt; 30: <span class="c-key">return</span>
+
+    kind  = self._elegir_actividad()                     <span class="c-com"># 2 · vive</span>
+    entry = self._ejecutar(kind)                         <span class="c-com">#     1 llamada a Groq 8B</span>
+    journal.add(entry)
+    pers.state.energy -= 4                               <span class="c-com">#     pensar cansa</span>
+
+    top = journal.top_unshared()                         <span class="c-com"># 3 · ¿lo cuenta?</span>
+    <span class="c-key">if</span> top <span class="c-key">and</span> top[<span class="c-str">"impulse"</span>] > 0.6 <span class="c-key">and</span> pers.can_send_proactive():
+        self.send_fn(self._redactar(top))
+        journal.mark_shared(top[<span class="c-str">"id"</span>])</code></pre>
+        <div class="prose">
+          <ul>
+            <li><strong>Jitter en el intervalo.</strong> Tu <code>_CHECK_INTERVAL = 30 * 60</code> exacto se nota. Un <code>random.uniform(20, 40)</code> minutos hace que no parezca un cron.</li>
+            <li><strong>Pensar consume energía.</strong> Si el tick no cuesta nada, rumia sin parar. Restando energía, el sistema se autorregula: piensa, se cansa, descansa, vuelve — y ese ciclo se nota en su tono.</li>
+            <li><strong>El silencio sigue siendo válido.</strong> Mantén el <code>[SILENCIO]</code> de <code>PROACTIVE_PROMPT</code>. Que a veces tenga algo y decida no contarlo también es carácter.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Memoria</div>
+      <h2>Neo4j no hace falta</h2>
+      <p class="lede">No es opinión de estilo — sale de tu propio código.</p>
+    </div>
+    <div class="grid g3">
+      <article class="card">
+        <h4>Nunca usas lo que lo justifica</h4>
+        <p>Una base de grafos existe para <strong>traversal de profundidad arbitraria</strong>. Tus llamadas: <code>depth=2</code> en <code>neo4j.py:226</code> y <code>:230</code>, <code>depth=1</code> en <code>:234</code>. Máximo 2, fijo, en todas. Profundidad 2 en SQL es <em>un JOIN</em>.</p>
+      </article>
+      <article class="card">
+        <h4>Y Postgres sería más rápido</h4>
+        <p><code>get_relevant_context</code> hace un viaje a Aura por entidad, más hasta 10 en el fallback difuso, más uno final. En Postgres es <strong>una query</strong> con <code>WHERE from_name = ANY($1)</code>. Un viaje en vez de quince.</p>
+      </article>
+      <article class="card">
+        <h4>Y de hecho ya no existe</h4>
+        <p>Comprobado: <code>029bddf5.databases.neo4j.io</code> <strong>ni siquiera resuelve por DNS</strong>, mientras que <code>databases.neo4j.io</code> sí. No está pausada — está <strong>borrada</strong>. Aura elimina las instancias gratuitas tras un tiempo pausadas.</p>
+        <p>Y no te enteraste porque cada fallo devuelve <code>""</code> en silencio (<code>memory.py:303</code>) y no tienes <code>logging.basicConfig</code>, así que todos los <code>logging.info</code> son invisibles.</p>
+      </article>
+    </div>
+
+    <div class="thesis prose" style="margin-top:1.75rem">
+      <div class="eyebrow" style="color:var(--accent)">Consecuencia práctica</div>
+      <p class="big">No hubo nada que migrar. El grafo llevaba tiempo sin existir.</p>
+      <p>Lo que parecía la parte delicada de la fase 02 — mover datos de Aura sin perder el <code>history</code> — desapareció. Neo4j está retirado del proyecto: módulo, dependencia, variables de configuración y README. El grafo vive ahora en el mismo Postgres y empieza de cero, que es exactamente donde estaba de todas formas.</p>
+      <p>También quiere decir que <strong>todo lo que IRIS ha recordado hasta hoy salió solo del vector</strong> — las 30 memorias de <code>iris_memories</code>. Es una buena noticia disfrazada: la capa que sí funcionaba es la que hace el trabajo pesado.</p>
+    </div>
+    <div class="prose stack" style="margin-top:1.75rem">
+      <p><strong>Consolidar no es abandonar el grafo.</strong> Un grafo es un conjunto de nodos y aristas, no una tecnología. Guardas <code>iris_entities</code> e <code>iris_relations</code> en el Postgres que ya tienes y conservas relaciones tipadas, contexto, fecha y la evolución en <code>history</code>. Y tu arquitectura ya lo anticipó: <code>BaseGraphStorage</code> existe, así que es escribir una clase detrás de una interfaz — no tocas <code>memory.py</code> ni <code>agent.py</code>.</p>
+      <p><strong>Pero el ahorro grande no es la base de datos.</strong> Es quitar la llamada a LLM por mensaje. En vez de pedirle a Groq que extraiga nombres del texto, se comprueba cuáles de los nombres que Iris <em>ya conoce</em> están escritos en él — la misma pregunta al revés, y sale gratis. La lista de nombres se cachea diez minutos y el matching es texto normalizado con límites de palabra, así que «mañana» no dispara «Ana» y «Halcon» sí encuentra «Halcón».</p>
+      <p>Y hay una propiedad de tu diseño que hace esto mucho más capaz de lo que parece: <code>get_relevant_memories</code> ya enriquece la consulta del grafo con los resultados vectoriales (<code>memory.py:251</code>). Así que si preguntas por «mi hermana» y el vector recupera «Lucía es su hermana», el nombre <em>aparece</em> en el texto enriquecido y el matcher lo encuentra igual. El cross-referencing que ya tenías cubre justo el caso que la coincidencia literal se perdería.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Hallazgos</div>
+      <h2>Qué encontré leyendo el código</h2>
+    </div>
+    <div class="scroller">
+      <table>
+        <thead><tr><th>Sev</th><th>Ubicación</th><th>Qué pasa</th></tr></thead>
+        <tbody>
+          <tr><td><span class="sev s-med">Resuelto</span></td><td class="loc">companion/server.py</td><td>Escuchaba en <code>0.0.0.0:7891</code> <strong>sin ninguna autenticación</strong>, y el <code>.bat</code> abría el puerto a toda la red. Ahora exige token en cada petición y el firewall se limita al rango de WSL2. Atarlo a loopback no servía: Iris vive en WSL2 y llega por la NIC virtual, no por <code>127.0.0.1</code> — la defensa tenía que ser autenticación.</td></tr>
+          <tr><td><span class="sev s-crit">Crítico</span></td><td class="loc">.env · LLM_MODEL</td><td><strong>Los dos modelos de Groq que usabas ya no existen.</strong> <code>llama-3.3-70b-versatile</code> y <code>llama-3.1-8b-instant</code> devuelven <code>404 model_not_found</code> — Groq retiró la línea Llama entera. IRIS no podía hacer <em>ninguna</em> llamada al LLM: ni chat, ni análisis de mood, ni extracción de memoria, ni grafo. Y fallaba en silencio, porque cada uno de esos caminos captura la excepción y sigue. Cambiado a <code>openai/gpt-oss-120b</code> y <code>openai/gpt-oss-20b</code>, verificados en ejecución.</td></tr>
+          <tr><td><span class="sev s-med">Resuelto</span></td><td class="loc">storage/supabase.py</td><td><strong>Era ~2.000 ms por operación; ahora ~200 ms.</strong> Abrir una conexión nueva cada vez costaba dos segundos de handshake TCP+TLS+auth contra el pooler de Supabase — unos 12 s por turno antes de que el LLM escribiera una palabra. Con pool y lecturas en autocommit, las seis lecturas de un turno bajan a <strong>1,2 s</strong>.</td></tr>
+          <tr><td><span class="sev s-med">Resuelto</span></td><td class="loc">core/claude_delegate.py</td><td><code>--dangerously-skip-permissions</code> autorizaba también Bash — cualquier comando que se le ocurriera a un LLM. Sustituido por lista explícita: puede leer, escribir y buscar archivos, no ejecutar. Sin <code>--bare</code>, que rompería la facturación por suscripción.</td></tr>
+          <tr><td><span class="sev s-high">Alto</span></td><td class="loc">core/memory.py:252</td><td>Una llamada a LLM por mensaje solo para extraer entidades, más hasta ~15 viajes a Aura. Mayor fuente de latencia por turno; no aporta en la mayoría.</td></tr>
+          <tr><td><span class="sev s-med">Resuelto</span></td><td class="loc">utils/history.py · personality.py</td><td>Un <code>IrisAgent</code> compartido entre cinco hilos sin ningún lock: Telegram durante una conversación por voz intercalaba el historial, y dos ajustes de trust simultáneos perdían uno. Resuelto con lock en el historial y <code>RLock</code> en la personalidad — <code>record_interaction()</code> llama a <code>adjust_trust()</code> y con un lock simple se bloquearía a sí mismo. Verificado con 6 hilos concurrentes.</td></tr>
+          <tr><td><span class="sev s-med">Medio</span></td><td class="loc">storage/neo4j.py:81</td><td>El tipo de relación se interpola en Cypher con f-string y viene de salida de LLM. <code>_sanitize_relation</code> no filtra <code>]</code>, <code>&gt;</code> ni backticks — inyección estrecha pero real. Desaparece al consolidar.</td></tr>
+          <tr><td><span class="sev s-med">Resuelto</span></td><td class="loc">voice/tts.py</td><td>La llamada a ElevenLabs iba <strong>sin <code>timeout</code></strong>: una API colgada dejaba el hilo de TTS bloqueado para siempre e IRIS muda sin dar error. Ahora <code>(5, 45)</code> con captura explícita del timeout.</td></tr>
+          <tr><td><span class="sev s-med">Resuelto</span></td><td class="loc">voice/tts.py</td><td>El <code>voice_id</code> se indexaba con <code>current_key_index</code>, así que agotar una clave <strong>le cambiaba la voz a mitad de respuesta</strong>. Son cosas independientes: la clave es con qué cuenta pagas, la voz es quién suena.</td></tr>
+          <tr><td><span class="sev s-med">Medio</span></td><td class="loc">core/claude_delegate.py:23</td><td>El prefiltro dispara con <code>crear</code>, <code>abrir</code>, <code>buscar</code>, <code>leer</code>. «¿Te gustaría crear una banda conmigo?» se va a delegación — y con la arquitectura B eso consume cuota.</td></tr>
+          <tr><td><span class="sev s-med">Medio</span></td><td class="loc">storage/supabase.py:70</td><td>Índice <code>ivfflat</code> creado sobre tabla <em>vacía</em>: necesita datos para entrenar centroides. <code>hnsw</code> no.</td></tr>
+          <tr><td><span class="sev s-med">Medio</span></td><td class="loc">core/llm_factory.py:116</td><td>Solo <code>groq</code> y <code>ollama</code>; CLAUDE.md documenta <code>anthropic</code> y <code>openai</code>. Y <code>capabilities.md:26-27</code> dice que no puede ver la pantalla ni controlar programas — sí puede.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Ejecución</div>
+      <h2>Plan por fases</h2>
+      <p class="lede">Cada fase deja el sistema funcionando. Solo la última cuesta dinero, y es opcional.</p>
+    </div>
+
+    <div class="phases">
+
+      <div class="phase">
+        <div class="num">00<small>1–2 días</small></div>
+        <div class="body">
+          <h3>Seguridad y corrección <span class="tag t-new">antes de nada</span></h3>
+          <p class="why">No dependen de ninguna decisión de arquitectura. La del pool era la que más se notaba: 12 segundos por turno.</p>
+          <ul>
+            <li class="done"><strong>Pool de conexiones</strong> — 12 s → 1,2 s por turno, verificado</li>
+            <li class="done">Lecturas en autocommit — evitan el rollback que hace <code>putconn()</code></li>
+            <li class="done"><code>local_files_only</code> en el encoder — 25 peticiones a HuggingFace → 0</li>
+            <li class="done">Token compartido en el companion + firewall acotado al rango de WSL2</li>
+            <li class="done"><code>--allowedTools</code> en lugar de <code>--dangerously-skip-permissions</code></li>
+            <li class="done"><code>timeout</code> en ElevenLabs y voz desacoplada de la rotación de claves</li>
+            <li class="done">Locks en historial y estado — verificado con 6 hilos concurrentes</li>
+            <li class="done"><code>logging.basicConfig(force=True)</code> — se acabó el silencio</li>
+            <li class="done">CLAUDE.md, README y <code>capabilities.md</code> sincronizados</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="num">01<small>~1 semana</small></div>
+        <div class="body">
+          <h3>Exprimir la CLI <span class="tag t-rec">0 € · suscripción</span></h3>
+          <p class="why">La mayor parte del beneficio de «Claude nativo» sin abrir factura. Y no es trabajo tirado: los esquemas y la personalidad como system prompt se traducen casi directos si algún día migras a la API.</p>
+          <ul>
+            <li><code>--output-format json</code>; borrar la heurística de <code>_ERROR_PREFIXES</code></li>
+            <li><code>--json-schema</code> para las acciones de escritorio; borrar el <code>re.sub</code> de fences</li>
+            <li><code>--append-system-prompt</code>; <strong>eliminar la llamada de narración</strong></li>
+            <li>Visión pasando la ruta del archivo, no el data URI en texto</li>
+            <li><code>--resume</code> para contexto entre turnos; <code>stream-json</code> para la voz</li>
+            <li>Registrar <code>total_cost_usd</code> — es tu medición para decidir la fase 07</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase doing">
+        <div class="num">02<small>en curso</small></div>
+        <div class="body">
+          <h3>Memoria: consolidar y ampliar <span class="tag t-rec">0 €</span></h3>
+          <p class="why">Una base de datos menos que desplegar y que puede caerse, un tercio menos de llamadas de análisis por turno, y las dos tablas que necesita la vida interior. Se hace todo junto porque toca la misma capa.</p>
+          <ul>
+            <li class="done"><code>BasePreferenceStorage</code> y <code>BaseJournalStorage</code> en <code>storage/base.py</code></li>
+            <li class="done">Tablas <code>iris_preferences</code> e <code>iris_journal</code> + implementaciones Supabase</li>
+            <li class="done">Implementaciones SQLite para el fallback local</li>
+            <li class="done">Cableado en <code>StorageFactory</code></li>
+            <li class="done"><code>PostgresGraphStorage</code> con traversal por CTE recursivo</li>
+            <li class="done"><code>GRAPH_BACKEND=auto|postgres|neo4j</code> — por defecto no cambia nada</li>
+            <li class="done"><code>scripts/migrate_graph.py</code> con simulacro y <code>--apply</code></li>
+            <li class="done"><code>_EntityMatcher</code> sustituye la llamada a LLM por mensaje</li>
+            <li class="done">Verificado contra Supabase real: esquema, traversal, <code>history</code>, preferencias, diario</li>
+            <li class="done">Migración descartada — la instancia de Aura ya no existe</li>
+            <li class="done">Neo4j retirado por completo: módulo, dependencia, settings y README</li>
+            <li class="done">Índice de vectores migrado de <code>ivfflat</code> a <code>hnsw</code></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="num">03<small>~1 semana</small></div>
+        <div class="body">
+          <h3>Preferencias <span class="tag t-rec">0 €</span></h3>
+          <p class="why">Aquí es donde por primera vez tiene opiniones que no programaste. Ojo al orden: se observa antes de conectarla.</p>
+          <ul>
+            <li class="done"><code>iris_reactions</code> en <code>MEMORY_EXTRACTION_PROMPT</code>, sin llamada extra</li>
+            <li class="done"><code>core/preferences.py</code> — refuerzo decreciente y decaimiento derivado</li>
+            <li class="done">Persistencia en <code>_extract_and_store</code>, cableado en <code>IrisAgent</code></li>
+            <li class="done"><code>/gustos</code> para ver qué se está formando</li>
+            <li class="done">Conectado a <code>build_system_prompt()</code>: gustos + disposición</li>
+            <li class="done">Verificado con LLM real: se niega sin prisa, cede cuando hay algo en juego</li>
+            <li>Calibrar con <code>/gustos</code> según se vayan formando de verdad</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="num">04<small>~1 semana</small></div>
+        <div class="body">
+          <h3>Partir el proceso en dos <span class="tag t-rec">0 €</span></h3>
+          <p class="why">Hoy <code>main.py</code> arranca UI, agente, voz, Telegram y proactivo en el mismo proceso. Hasta separarlos no hay nada que desplegar.</p>
+          <ul>
+            <li class="done"><code>IRIS_MODE=local | client | server</code> — <code>local</code> por defecto, nada cambia</li>
+            <li class="done">Protocolo, hub del servidor y cliente del portátil con reconexión</li>
+            <li class="done"><code>core/executor.py</code>: los sitios que llaman no saben dónde se ejecuta</li>
+            <li class="done"><code>POST /chat</code>, <code>WS /stream</code>, <code>WS /agent</code></li>
+            <li class="done">Token en el handshake, timeout por tarea, errores que viajan</li>
+            <li class="done"><code>RemoteIris</code> — el cliente ya NO instancia un segundo <code>IrisAgent</code></li>
+            <li class="done">Comandos ejecutados en el servidor vía <code>POST /command</code></li>
+            <li class="done">Voz distribuida: el portátil graba, el servidor transcribe con Groq</li>
+            <li class="done">Dockerfile con ffmpeg, <code>requirements.server.txt</code> y compose con Caddy</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="num">05<small>2–3 días</small></div>
+        <div class="body">
+          <h3>Desplegar en Google Cloud <span class="tag t-rec">crédito de prueba</span></h3>
+          <p class="why">Con dominio propio desaparece el baile de <code>start_cloudflared</code>, que hoy consigue una URL efímera distinta en cada arranque.</p>
+          <ul>
+            <li><code>e2-small</code> (2 GB) o <code>e2-medium</code> (4 GB) — con 4 GB no hay dudas sobre torch</li>
+            <li>Base de datos en Supabase, fuera de la VM</li>
+            <li>STT: el cliente transmite audio por el WS; el servidor llama a Whisper de Groq</li>
+            <li>Caddy para TLS, webhook de Telegram fijo, <code>restart: unless-stopped</code></li>
+            <li>Alerta de presupuesto, y <strong>todo en Docker Compose sobre VM normal</strong> — nada específico de Google, para que el día 90 puedas quedarte, mudarte o volver a local sin migrar</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="num">06<small>~1 semana</small></div>
+        <div class="body">
+          <h3>Diario y vida autónoma <span class="tag t-rec">0 €</span></h3>
+          <p class="why">La pieza que da la sensación de Amadeus. Va después del despliegue porque las actividades reales necesitan el canal al portátil.</p>
+          <ul>
+            <li>Tipos de actividad y <code>ACTIVITY_PROMPTS</code>; el tick escribe al diario</li>
+            <li><code>/diario</code> — <strong>déjalo acumular sin dejarle escribir todavía</strong></li>
+            <li>Abre la iniciativa: umbral de <code>impulse</code> alto (0.75) y bájalo hasta el punto donde te alegra que escriba en vez de molestarte</li>
+            <li>Jitter en el intervalo; energía consumida por actividad</li>
+            <li>Actividades reales sobre el canal del portátil, con permisos acotados</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="phase paid">
+        <div class="num">07<small>opcional</small></div>
+        <div class="body">
+          <h3>Independencia del portátil <span class="tag t-pay">de pago</span></h3>
+          <p class="why">Solo si al usarla te molesta que los ojos y las manos dependan de que el portátil esté encendido. Para entonces tendrás <code>total_cost_usd</code> de meses reales.</p>
+          <ul>
+            <li><code>anthropic</code> como tercera vía en el factory, junto a Groq y la CLI</li>
+            <li>Enrutar solo lo que lo necesita: visión y herramientas cuando el agente esté desconectado</li>
+            <li>Tool Runner reutilizando los esquemas JSON de la fase 01</li>
+            <li>System prompt reordenado para el caché: lo estable primero tras un <code>cache_control</code>; hora, mood y energía a un mensaje <code>role: "system"</code></li>
+          </ul>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Costes</div>
+      <h2>Qué es gratis y hasta cuándo</h2>
+    </div>
+    <div class="thesis warn prose" style="margin-bottom:2rem">
+      <div class="eyebrow">Los 300 $ de Google Cloud</div>
+      <p>Crédito de prueba a <strong>90 días</strong>: ~100 $/mes de margen, y lo que no gastes caduca. Decidido usarlos, la consecuencia buena es que no tienes que pelearte con el límite de 1 GB del always-free.</p>
+      <p>A favor: el trial <strong>no cobra solo</strong>. Al agotarse el crédito o cumplirse los 90 días los recursos se detienen hasta que actives una cuenta de pago.</p>
+    </div>
+    <div class="scroller">
+      <table>
+        <thead><tr><th>Partida</th><th>Opción</th><th>Coste</th><th>Notas</th></tr></thead>
+        <tbody>
+          <tr><td>Servidor</td><td>GCP <code>e2-small</code> / <code>e2-medium</code></td><td class="yes">0 € · 90 días</td><td>~13–27 $/mes contra el crédito; después decides</td></tr>
+          <tr><td>Postgres + pgvector</td><td>Supabase free</td><td class="yes">0 €</td><td>Ya lo usas; el fallback a SQLite cubre caídas</td></tr>
+          <tr><td>Grafo, preferencias, diario</td><td>Tablas en el mismo Postgres</td><td class="yes">0 €</td><td>Una base de datos menos que mantener</td></tr>
+          <tr><td>Conversación y análisis</td><td>Groq</td><td class="yes">0 €</td><td>Como hoy, con rotación de claves</td></tr>
+          <tr><td>STT</td><td>Whisper vía Groq</td><td class="yes">~0 €</td><td>Quita el modelo del portátil</td></tr>
+          <tr><td>Visión, archivos, herramientas</td><td><code>claude -p</code> en tu PC</td><td class="yes">0 € extra</td><td>Tu suscripción, ya la pagas</td></tr>
+          <tr><td>Vida interior</td><td>Groq 8B, 1 llamada / 20–40 min</td><td class="yes">~0 €</td><td>Solo cuando tiene energía</td></tr>
+          <tr><td>TTS</td><td>ElevenLabs</td><td>tu plan actual</td><td>Sin cambios</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose" style="margin-top:1.75rem">
+      <details class="note">
+        <summary>Si algún día haces la fase 07: qué costaría</summary>
+        <p>Con ~5.000 tokens de entrada por turno y ~600 de salida, un turno delegado sale a <strong>2–6 céntimos</strong> con <code>claude-opus-5</code>, según <code>effort</code>. La palanca principal no es el caché, es <code>effort</code>: Opus 5 piensa por defecto y esos tokens se facturan como salida. Enrutando solo visión y herramientas — unos 300 turnos al mes — salen <strong>~18 $/mes</strong> con Opus 5 y <strong>~11 $</strong> con Sonnet 5.</p>
+        <p>Y ojo con el control de escritorio: <code>companion/screen.py:25</code> manda la captura a resolución nativa, y una imagen a máxima resolución son hasta ~4.800 tokens. Bajarla a 1080p recorta bastante sin perder precisión.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">Estado</div>
+      <h2>Dónde estamos</h2>
+    </div>
+    <div class="prose stack">
+      <p><strong>Fase 02 casi cerrada, y verificada contra Supabase real.</strong> Las cuatro tablas se crean solas al arrancar, el traversal por CTE recursivo devuelve lo correcto a profundidad 1 y 2 en ambos sentidos, la acumulación de <code>history</code> replica el comportamiento de Cypher, y preferencias y diario hacen round-trip completo. Los datos de prueba se limpiaron y tus 72 mensajes, 30 memorias y 1 fila de estado quedaron intactos.</p>
+      <p><strong>Fases 00 y 02 cerradas.</strong> Neo4j retirado del todo — sin variable para elegir backend, porque no tiene sentido poder elegir entre el que funciona y uno que ya no existe. Índice de vectores en HNSW. Pool de conexiones con lecturas en autocommit. 22 comprobaciones contra Supabase real, todas verdes, y tus 72 mensajes y 30 memorias intactos.</p>
+
+      <p><strong>Preferencias formándose y conectadas.</strong> Salen del mismo JSON de extracción que ya corría, con refuerzo decreciente y decaimiento derivado del tiempo. Una charla neutra produce cero reacciones — no inventa gustos para rellenar. Ambos bloques devuelven <code>""</code> mientras no haya nada asentado, así que no ensucian el prompt hasta que hay algo real que decir.</p>
+
+      <div class="thesis prose" style="margin:1.5rem 0">
+        <div class="eyebrow" style="color:var(--accent)">Lo que enseñó probarlo de verdad</div>
+        <p class="big">El test unitario encontró la cláusula de urgencia en el prompt. El de comportamiento descubrió que no servía.</p>
+        <p>Pedirle un resumen urgente — reunión en diez minutos, «me juego el puesto» — con una aversión fuerte y la energía por los suelos, y respondió: <em>«me parece una pérdida de tiempo y, sinceramente, no me apetece»</em>. La excepción estaba escrita, pero pesaba menos que las tres líneas de permiso para negarse que la precedían.</p>
+        <p>El arreglo fue de orden, no de contenido: <strong>primero comprueba si hay algo en juego</strong> — plazo, trabajo, alguien esperando — y solo si no lo hay entra el permiso. Más una frase que salva el carácter sin sacrificar la utilidad: <em>quejarse es en vez de nada, no en vez de ayudar</em>. Ahora contesta «manda el PDF y lo resumo, aunque no me apetezca», y sigue poniendo condiciones cuando no corre prisa.</p>
+        <p>Es la diferencia entre verificar que un texto está y verificar que hace algo. En un sistema cuyo comportamiento vive en prosa, solo cuenta lo segundo.</p>
+      </div>
+
+      <div class="thesis warn prose" style="margin:1.5rem 0">
+        <div class="eyebrow">Encontrado al probarlo</div>
+        <p class="big">IRIS llevaba tiempo sin poder llamar a ningún LLM.</p>
+        <p>Groq retiró la línea Llama entera. <code>llama-3.3-70b-versatile</code> y <code>llama-3.1-8b-instant</code> devuelven <code>404</code>, y eran tu modelo principal y el de análisis. Sin chat, sin mood, sin extracción de memoria, sin grafo.</p>
+        <p>Lo grave no es que Groq retire modelos — es que <strong>ninguno de esos caminos lo dijo</strong>. Cada uno captura la excepción y devuelve un valor vacío: el mood se congela, la extracción no guarda nada, el grafo devuelve <code>""</code>. Tres capas degradadas en silencio, igual que pasó con Aura. Es el mismo patrón que hace que <code>logging.basicConfig</code> esté en la fase 00.</p>
+      </div>
+
+      <p><strong>Fase 00 cerrada.</strong> El companion pide token y el firewall solo deja pasar a WSL2; Claude Code ya no corre con permisos totales; ElevenLabs tiene timeout y la voz no cambia al rotar claves; historial y personalidad llevan locks, probados con seis hilos a la vez; y <code>logging.basicConfig(force=True)</code> hace que por fin se vea lo que pasa dentro. CLAUDE.md, README y <code>capabilities.md</code> dicen lo que el código hace de verdad.</p>
+
+      <div class="thesis warn prose" style="margin:1.5rem 0">
+        <div class="eyebrow">El patrón que se repitió cuatro veces</div>
+        <p class="big">Todo lo que se rompió, se rompió en silencio.</p>
+        <p>El grafo llevaba meses sin existir. Los dos modelos de Groq devolvían 404. La instancia de Aura estaba borrada. Y el propio <code>basicConfig</code> era un no-op porque otra librería configuraba logging antes — el arreglo del silencio, en silencio.</p>
+        <p>Ninguno dio la cara, porque cada capa captura su excepción y devuelve un valor vacío: <code>{}</code>, <code>""</code>, una lista sin elementos. Es un patrón razonable tomado uno a uno — que un fallo del grafo no tumbe la conversación — y desastroso en conjunto: el sistema se degrada hasta quedarse hueco y sigue pareciendo que funciona.</p>
+        <p>La lección para lo que queda: <strong>capturar la excepción y seguir está bien; hacerlo sin dejar rastro, no</strong>. Con el logging arreglado, la próxima vez que algo se caiga lo vas a ver el mismo día.</p>
+      </div>
+
+      <p><strong>Fase 04 cerrada: el proceso ya se puede partir.</strong> El portátil abre un WebSocket hacia el servidor y ofrece dos capacidades — Claude con tu suscripción, y el escritorio. El servidor le pide cosas por ese mismo socket. Doce comprobaciones de extremo a extremo con servidor y cliente reales: token rechazado, ocho peticiones simultáneas sobre un solo socket con cada respuesta llegando a la suya, timeouts que cortan, errores que viajan, y reconexión sin reiniciar nada.</p>
+
+      <div class="thesis prose" style="margin:1.5rem 0">
+        <div class="eyebrow" style="color:var(--accent)">La pieza que lo hace invisible</div>
+        <p class="big">Ningún sitio que llama sabe dónde se ejecuta lo que pide.</p>
+        <p><code>agent.py</code> llama a <code>run_claude()</code> y a <code>desktop_request()</code>. En modo local corren aquí mismo; en modo servidor viajan por el WebSocket. La decisión vive en <code>core/executor.py</code> y en ningún otro sitio — por eso <code>IRIS_MODE=local</code> se comporta exactamente como antes y puedes seguir usando Iris mientras el resto se construye.</p>
+        <p>El detalle que costó ver: en modo servidor, <code>snap["wsl_path"]</code> apunta a un archivo <em>del portátil</em>. La captura tiene que leerse allí y viajar en base64, no como ruta. Es el tipo de cosa que solo aparece cuando de verdad hay dos máquinas.</p>
+      </div>
+
+      <div class="thesis warn prose" style="margin:1.5rem 0">
+        <div class="eyebrow">Un fallo de diseño, cazado antes de desplegar</div>
+        <p class="big">El modo cliente creaba un segundo cerebro.</p>
+        <p>Tal como quedó la fase 04, <code>main.py</code> en modo cliente seguía instanciando <code>IrisAgent()</code>. Eso son dos agentes contra la misma base de datos: <code>iris_state</code> tiene <em>una sola fila</em>, así que las dos personalidades se habrían sobrescrito, y los historiales se habrían entrelazado hasta dejar la memoria sin sentido.</p>
+        <p>El arreglo es <code>core/remote_iris.py</code>: expone la misma superficie que <code>IrisAgent</code> en todo lo que la UI y la voz usan, pero por HTTP y WebSocket. La UI, el avatar y <code>VoiceListener</code> no se enteran de nada — y el cliente ya no tiene ni personalidad ni memoria propias, porque no le corresponden.</p>
+      </div>
+
+      <p><strong>Voz distribuida — Whisper fuera del portátil.</strong> Grabar y detectar el silencio se queda en local (medir el RMS de unos chunks no cuesta nada, y el micrófono está ahí), pero el WAV viaja al servidor y lo transcribe la API de Groq. Se quita de tu máquina un modelo de 1–2 GB. Verificado de extremo a extremo: audio enviado, transcrito y respondido en frases sueltas en ~1,2 s.</p>
+      <p>Un detalle que hubo que respetar: Whisper <em>se inventa texto</em> cuando le das audio sin voz — un tono puro transcribe como «Gracias.». El faster-whisper local lo filtraba con <code>vad_filter</code> y la API no, así que <code>record_utterance()</code> devuelve <code>None</code> si nunca detectó voz y ese <code>None</code> corta antes de mandar nada.</p>
+
+      <h3 style="margin-top:1.25rem">Lo que queda de latencia es geografía</h3>
+      <p>Medido en tu portátil, un <code>SELECT 1</code> sobre una conexión ya abierta tarda <strong>~208 ms</strong>. Ese es el viaje de ida y vuelta de tu casa a la región de Supabase, y no hay optimización de código que lo baje: es la velocidad de la luz más unos cuantos saltos de red.</p>
+      <p>Es decir, ya llegaste al suelo de lo que se puede hacer desde casa. Lo siguiente que mueve esa cifra no es más código — es <strong>poner el proceso cerca de la base de datos</strong>. Una VM en la misma región baja ese viaje a un puñado de milisegundos, y las seis lecturas del turno pasan de 1,2 s a algo imperceptible.</p>
+      <p>Lo cual le da a la fase 05 un motivo que no tenía al empezar: desplegar no era solo para que IRIS viva sin el portátil — también es la mayor optimización de latencia que queda sobre la mesa.</p>
+      <p style="margin-top:1rem">Una observación sobre el conjunto: la arquitectura que ya tienes es buena. Los interfaces abstractos de <code>storage/base.py</code>, el fallback automático del <code>StorageFactory</code>, la separación entre motor de personalidad y agente, el patrón del companion — eso es lo difícil y ya está resuelto. Por eso consolidar el grafo es escribir una clase, y añadir una vida interior es enganchar dos tablas y un tick. Lo que sobra es el acoplamiento al portátil, y resulta que ni siquiera hay que romperlo del todo: basta con hablarle por un cable.</p>
+    </div>
+  </div>
+</section>
+
+<footer class="end">
+  <div class="wrap prose">
+    <p>Revisión 3 — unifica el plan de despliegue y el diseño de vida interior en un solo documento. Sobre <code>feature/iris-core</code> en <code>a31dcf2</code>; las referencias a línea corresponden a ese commit. Comprobado: el fallback local estaba vacío, Supabase y Neo4j son los backends activos.</p>
+  </div>
+</footer>

@@ -141,46 +141,84 @@ def get_claude_companion_url(companion_url: str) -> str:
     return companion_url
 
 
-def take_desktop_snapshot(companion_url: str) -> dict:
-    """Toma screenshot + elementos UI. Retorna el dict del companion."""
-    import requests as _req
-    resp = _req.get(f"{companion_url}/screenshot", timeout=10)
-    resp.raise_for_status()
-    return resp.json()
+def companion_headers() -> dict:
+    """Cabecera de autenticación del companion. Vacía si aún no generó token."""
+    from companion.auth import TOKEN_HEADER, read_token
+    token = read_token()
+    return {TOKEN_HEADER: token} if token else {}
 
 
-def execute_desktop_actions(actions: list[dict], companion_url: str) -> str:
-    """Ejecuta la lista de acciones devuelta por Claude Code vía el companion."""
+def companion_get(companion_url: str, path: str, timeout: int = 10):
     import requests as _req
+    return _req.get(f"{companion_url}{path}", headers=companion_headers(), timeout=timeout)
+
+
+def companion_post(companion_url: str, path: str, payload: dict, timeout: int = 5):
+    import requests as _req
+    return _req.post(f"{companion_url}{path}", json=payload, headers=companion_headers(), timeout=timeout)
+
+
+def take_desktop_snapshot(companion_url: str = "") -> dict:
+    """
+    Screenshot + elementos de UI.
+
+    La imagen viaja en base64 dentro del propio dict, no como ruta: en modo
+    servidor el archivo está en el portátil y `wsl_path` no significa nada del
+    otro lado. Así el mismo código sirve en local y en remoto.
+    """
+    from core.executor import desktop_request
+    snap = desktop_request("GET", "/screenshot", timeout=20)
+
+    if "image_b64" not in snap:
+        snap["image_b64"] = _read_screenshot_b64(snap)
+    return snap
+
+
+def _read_screenshot_b64(snap: dict) -> str:
+    """Lee el PNG que dejó el companion y lo devuelve en base64. Corre donde esté el archivo."""
+    path = snap.get("wsl_path") or snap.get("windows_path") or ""
+    if not path:
+        return ""
+    try:
+        with open(windows_to_wsl_path(path), "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    except Exception as e:
+        print(f"[Companion] No pude leer la captura: {e}")
+        return ""
+
+
+def execute_desktop_actions(actions: list[dict], companion_url: str = "") -> str:
+    """Ejecuta la lista de acciones devuelta por Claude Code, esté donde esté el escritorio."""
     import time
+    from core.executor import desktop_request
     done = []
     for act in actions:
         atype = act.get("action", "")
         try:
             if atype == "launch":
-                _req.post(f"{companion_url}/launch", json={"app": act["app"]}, timeout=5)
+                desktop_request("POST", "/launch", {"app": act["app"]})
                 done.append(f"Abrí {act['app']}")
                 time.sleep(1.5)
             elif atype == "click":
-                _req.post(f"{companion_url}/click", json={"x": act["x"], "y": act["y"], "button": act.get("button", "left")}, timeout=5)
+                desktop_request("POST", "/click", {"x": act["x"], "y": act["y"], "button": act.get("button", "left")})
                 done.append(f"Click en ({act['x']}, {act['y']})")
             elif atype == "double_click":
-                _req.post(f"{companion_url}/double_click", json={"x": act["x"], "y": act["y"]}, timeout=5)
+                desktop_request("POST", "/double_click", {"x": act["x"], "y": act["y"]})
                 done.append(f"Doble click en ({act['x']}, {act['y']})")
             elif atype == "right_click":
-                _req.post(f"{companion_url}/right_click", json={"x": act["x"], "y": act["y"]}, timeout=5)
+                desktop_request("POST", "/right_click", {"x": act["x"], "y": act["y"]})
                 done.append(f"Click derecho en ({act['x']}, {act['y']})")
             elif atype == "type":
-                _req.post(f"{companion_url}/type", json={"text": act["text"]}, timeout=5)
+                desktop_request("POST", "/type", {"text": act["text"]})
                 done.append(f"Escribí: {act['text']}")
             elif atype == "key":
-                _req.post(f"{companion_url}/key", json={"key": act["key"]}, timeout=5)
+                desktop_request("POST", "/key", {"key": act["key"]})
                 done.append(f"Tecla: {act['key']}")
             elif atype == "hotkey":
-                _req.post(f"{companion_url}/hotkey", json={"keys": act["keys"]}, timeout=5)
+                desktop_request("POST", "/hotkey", {"keys": act["keys"]})
                 done.append(f"Atajo: {'+'.join(act['keys'])}")
             elif atype == "scroll":
-                _req.post(f"{companion_url}/scroll", json={"x": act["x"], "y": act["y"], "direction": act.get("direction", "down"), "amount": act.get("amount", 3)}, timeout=5)
+                desktop_request("POST", "/scroll", {"x": act["x"], "y": act["y"], "direction": act.get("direction", "down"), "amount": act.get("amount", 3)})
                 done.append(f"Scroll {act.get('direction', 'down')}")
         except Exception as e:
             done.append(f"Error en {atype}: {e}")
@@ -188,7 +226,20 @@ def execute_desktop_actions(actions: list[dict], companion_url: str) -> str:
 
 
 def ensure_companion_alive(companion_url: str, timeout: int = 8) -> bool:
-    """Verifica que el companion esté corriendo; si no, lo lanza y espera."""
+    """
+    Verifica que el escritorio esté disponible; si es local y no corre, lo lanza.
+
+    En modo servidor no hay nada que lanzar — el companion vive en el portátil,
+    y lo único que se puede comprobar es si el agente está conectado. Si el
+    portátil está apagado, la respuesta honesta es "ahora no puedo".
+    """
+    from config.settings import settings
+    from core.executor import agent_available
+    from core.link import protocol as _P
+
+    if settings.mode.mode == "server":
+        return agent_available(_P.CAP_DESKTOP)
+
     import requests as _req
     try:
         _req.get(f"{companion_url}/health", timeout=2)
@@ -420,10 +471,13 @@ class ClaudeDelegator:
         print(f"[Claude Code] PROMPT ENVIADO:\n{full_prompt}")
 
         from config.settings import settings
+        # Sin --bare a propósito: bare mode ignora las credenciales OAuth y
+        # exigiría ANTHROPIC_API_KEY, o sea pasar de la suscripción a pago por
+        # token. Esto se factura contra la suscripción.
         cmd = [
             "wsl",
             settings.claude.bin_path,
-            "--dangerously-skip-permissions",
+            "--allowedTools", settings.claude.allowed_tools,
             "-p", full_prompt,
         ]
 

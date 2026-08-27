@@ -1,6 +1,6 @@
 """
 core/memory.py
-Memoria de Iris — STM + LTM vectorial (Supabase) + LTM grafo (Neo4j).
+Memoria de Iris — STM + LTM vectorial y LTM grafo, ambas sobre Postgres.
 Extrae memorias cada 30 mensajes usando un agente que decide si es relevante.
 """
 
@@ -18,7 +18,6 @@ from config.prompts import (
     MEMORY_EXTRACTION_PROMPT,
     MEMORY_CONTEXT_PROMPT,
     GRAPH_EXTRACTION_PROMPT,
-    GRAPH_QUERY_PROMPT,
     MEMORY_RELEVANCE_PROMPT,
 )
 
@@ -56,13 +55,96 @@ def _sanitize_relation(relation: str) -> str:
     return sanitized.upper().replace(" ", "_")
 
 
+def _strip_accents(text: str) -> str:
+    normalized = unicodedata.normalize("NFD", text)
+    return "".join(c for c in normalized if unicodedata.category(c) != "Mn")
+
+
+class _EntityMatcher:
+    """
+    Encuentra qué entidades conocidas aparecen en un texto.
+
+    Sustituye a la llamada a LLM que hacía _extract_query_entities. En vez de
+    pedirle al modelo que extraiga nombres de un mensaje, comprueba cuáles de
+    los nombres que Iris ya conoce están escritos en él — que es la misma
+    pregunta hecha al revés, y sale gratis.
+
+    Además quita un fallo silencioso: cuando el LLM se atragantaba, la función
+    antigua devolvía listas vacías y el grafo no aportaba nada sin avisar.
+
+    El matching es sobre texto normalizado (sin acentos, en minúsculas) y con
+    límites de palabra, para que "Ana" no case dentro de "mañana".
+    """
+
+    TTL_SECONDS = 600     # relee la lista de nombres cada 10 min
+    MIN_LEN     = 3       # nombres más cortos generan demasiados falsos positivos
+    MAX_MATCHES = 5       # no inundar el traversal
+
+    def __init__(self, graph):
+        self._graph     = graph
+        self._patterns: list[tuple[re.Pattern, str]] = []
+        self._loaded_at = 0.0
+        self._lock      = threading.Lock()
+
+    def invalidate(self) -> None:
+        """Llamar tras escribir entidades nuevas."""
+        with self._lock:
+            self._loaded_at = 0.0
+
+    def _refresh_if_stale(self) -> None:
+        import time
+        if time.monotonic() - self._loaded_at < self.TTL_SECONDS and self._patterns:
+            return
+
+        with self._lock:
+            if time.monotonic() - self._loaded_at < self.TTL_SECONDS and self._patterns:
+                return
+            try:
+                names = self._graph.get_entity_names()
+            except Exception as e:
+                logging.warning(f"[Memory] No pude leer nombres de entidad: {e}")
+                names = []
+
+            patterns = []
+            for name in names:
+                norm = _strip_accents(name).lower().strip()
+                if len(norm) < self.MIN_LEN:
+                    continue
+                # Lookarounds en vez de \b: así "C++" o "Node.js" casan bien
+                patterns.append(
+                    (re.compile(rf"(?<!\w){re.escape(norm)}(?!\w)"), name)
+                )
+
+            # Los nombres largos primero: "proyecto Halcón" gana a "Halcón"
+            patterns.sort(key=lambda p: len(p[1]), reverse=True)
+
+            self._patterns  = patterns
+            self._loaded_at = time.monotonic()
+            logging.info(f"[Memory] Matcher de entidades: {len(patterns)} nombres cargados.")
+
+    def find(self, text: str) -> list[str]:
+        self._refresh_if_stale()
+        if not self._patterns:
+            return []
+
+        haystack = _strip_accents(text).lower()
+        found: list[str] = []
+        for pattern, original in self._patterns:
+            if pattern.search(haystack):
+                found.append(original)
+                if len(found) >= self.MAX_MATCHES:
+                    break
+        return found
+
+
 class MemoryManager:
 
     EXTRACT_EVERY = 20  # mensajes entre extracciones
 
-    def __init__(self, analysis_llm, storage):
+    def __init__(self, analysis_llm, storage, preferences=None):
         self.analysis_llm = analysis_llm
         self.storage      = storage
+        self.preferences  = preferences   # PreferenceEngine, opcional
         self.owner_name   = settings.iris.owner_name
         self.timeout_mins = settings.memory.session_timeout_minutes
         self.stm_persist  = settings.memory.stm_persist_messages
@@ -71,6 +153,8 @@ class MemoryManager:
         self._session_buffer: list[dict] = []
         self._session_timer: Optional[threading.Timer] = None
         self._message_count = 0  # contador para extracción cada N mensajes
+
+        self._entity_matcher = _EntityMatcher(self.storage.graph)
 
         logging.info(f"[Memory] Iniciada — {self.storage.vector.count()} memorias vectoriales")
 
@@ -177,7 +261,18 @@ class MemoryManager:
             )
             response = self.analysis_llm.invoke(prompt)
             content  = re.sub(r'```(?:json)?\s*', '', response.content).strip()
-            facts    = json.loads(content).get("facts", [])
+            payload  = json.loads(content)
+            facts    = payload.get("facts", [])
+
+            # Del mismo JSON sale lo que Iris sintió — sin llamada extra
+            if self.preferences is not None:
+                try:
+                    n = self.preferences.reinforce_many(payload.get("iris_reactions", []))
+                    if n:
+                        logging.info(f"[Memory] {n} reacciones de Iris registradas.")
+                    self.preferences.prune()
+                except Exception as e:
+                    logging.warning(f"[Memory] Error registrando reacciones: {e}")
 
             for fact in facts:
                 self.storage.vector.add(
@@ -221,6 +316,9 @@ class MemoryManager:
                     properties = rel.get("properties", {}),
                 )
 
+            # Hay entidades nuevas: que el matcher las relea en la próxima consulta
+            self._entity_matcher.invalidate()
+
             logging.info("[Memory] Grafo actualizado.")
         except Exception as e:
             logging.error(f"[Memory] Error extracción grafo: {e}")
@@ -228,18 +326,21 @@ class MemoryManager:
     # ─── Recuperación ─────────────────────────────────────────────────────────
 
     def _extract_query_entities(self, text: str) -> dict:
-        try:
-            prompt   = GRAPH_QUERY_PROMPT.format(text=text)
-            response = self.analysis_llm.invoke(prompt)
-            content  = re.sub(r'```(?:json)?\s*', '', response.content).strip()
-            result   = json.loads(content)
-            return {
-                "entities":       result.get("entities", []),
-                "relation_types": [_sanitize_relation(r) for r in result.get("relation_types", [])],
-            }
-        except Exception as e:
-            logging.warning(f"[Memory] Error extrayendo entidades: {e}")
-            return {"entities": [], "relation_types": []}
+        """
+        Qué entidades conocidas aparecen en el texto.
+
+        Antes esto era una llamada a LLM por cada mensaje. Ahora es una búsqueda
+        en memoria contra los nombres que Iris ya tiene guardados — el modelo no
+        aportaba nada que no se pueda resolver mirando qué nombres están escritos.
+
+        Los tipos de relación ya no se infieren: el traversal devuelve todas las
+        relaciones de las entidades encontradas y es el LLM que lee el contexto
+        quien decide cuáles importan, que es donde mejor se le da.
+        """
+        return {
+            "entities":       self._entity_matcher.find(text),
+            "relation_types": [],
+        }
 
     def get_relevant_memories(self, query: str, n_results: int = 5) -> str:
         vector_block = self._get_vector_context(query, n_results)

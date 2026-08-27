@@ -9,6 +9,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 import logging
+import threading
 
 import json
 import re
@@ -89,11 +90,69 @@ class PersonalityEngine:
         self.decay_amount  = settings.personality.trust_decay_amount
         self.state         = self._load_state()
         self._analysis_llm = None
+        self._preferences  = None
+        # RLock, no Lock: record_interaction() llama a adjust_trust(), y ambos
+        # necesitan el lock — con uno simple se bloquearía a sí mismo.
+        self._lock         = threading.RLock()
         self._apply_time_decay()
         self._apply_energy_regen()
 
     def set_analysis_llm(self, llm):
         self._analysis_llm = llm
+
+    def set_preferences(self, engine):
+        """PreferenceEngine — opcional; sin él, el bloque de gustos no aparece."""
+        self._preferences = engine
+
+    # ─── Disposición ──────────────────────────────────────────────────────────
+
+    def build_disposition(self) -> str:
+        """
+        Cómo está Iris para atender lo que le pidan, y qué margen tiene.
+
+        No decide nada: describe el estado y le da permiso explícito. Un umbral
+        en código (`if ganas < 0.3: negarse`) produce un comportamiento que el
+        usuario aprende a esquivar y que responde igual a dos peticiones muy
+        distintas. El modelo, en cambio, sabe perfectamente cómo reacciona
+        alguien cansado a quien además le desagrada lo que le están pidiendo.
+
+        Devuelve "" cuando no hay nada reseñable — así no ensucia todos los turnos.
+        """
+        partes: list[str] = []
+
+        energia = self.state.energy
+        if energia < 25:
+            partes.append("Estás agotada; te cuesta que te apetezca cualquier cosa.")
+        elif energia < 50:
+            partes.append("Estás algo cansada.")
+
+        stage = self.get_trust_stage()
+        if stage in (TrustStage.STRANGER, TrustStage.ACQUAINTANCE):
+            partes.append("Todavía no hay tanta confianza como para dar todo por hecho.")
+
+        tiene_gustos = bool(
+            getattr(self, "_preferences", None) and self._preferences.significant()
+        )
+
+        if not partes and not tiene_gustos:
+            return ""
+
+        estado = (" " + " ".join(partes)) if partes else ""
+
+        return (
+            f"[TU DISPOSICIÓN AHORA]:{estado}\n"
+            "PRIMERO comprueba si hay algo en juego: un plazo, una reunión, trabajo, "
+            "dinero, alguien esperándole, o que diga explícitamente que es importante o "
+            "urgente. Si lo hay, LO HACES — sin negociar y sin rebajarlo a medias. Puedes "
+            "quejarte mientras lo haces, pero quejarse es en vez de nada, no en vez de "
+            "ayudar. Decirle que su urgencia te parece una pérdida de tiempo es lo peor "
+            "que puedes hacer.\n"
+            "Si NO hay nada en juego — es un capricho, puede esperar, o simplemente le "
+            "apetecía — entonces sí: puedes acceder, hacerlo de mala gana, poner "
+            "condiciones, proponer otro momento o negarte. Es tu decisión y no tienes que "
+            "justificarla como una máquina rindiendo cuentas. Un 'ahora no, estoy muerta' "
+            "o un '¿te vale mañana?' son respuestas perfectamente válidas."
+        )
 
     # ─── Persistencia ─────────────────────────────────────────────────────────
 
@@ -104,7 +163,12 @@ class PersonalityEngine:
         return EmotionalState(trust_level=settings.personality.initial_trust)
 
     def save_state(self):
-        self.state_storage.save(self.state.to_dict())
+        # Serializar bajo lock: si dos hilos guardan a la vez mientras un
+        # tercero muta el estado, to_dict() puede leer una mezcla incoherente
+        # (mood de una conversación con la energía de otra).
+        with self._lock:
+            data = self.state.to_dict()
+        self.state_storage.save(data)
 
     # ─── Trust System ──────────────────────────────────────────────────────────
 
@@ -117,8 +181,11 @@ class PersonalityEngine:
         return TrustStage.BONDED
 
     def adjust_trust(self, amount: float, reason: str = ""):
-        old = self.state.trust_level
-        self.state.trust_level = max(0.0, min(100.0, self.state.trust_level + amount))
+        # Lectura-modificación-escritura: sin lock, dos hilos ajustando a la vez
+        # pierden uno de los dos incrementos.
+        with self._lock:
+            old = self.state.trust_level
+            self.state.trust_level = max(0.0, min(100.0, self.state.trust_level + amount))
         logging.debug(f"[Trust] {old:.1f} → {self.state.trust_level:.1f} ({reason})")
 
     def _apply_time_decay(self):
@@ -149,9 +216,10 @@ class PersonalityEngine:
             logging.info(f"[Personality] Mood → LONELY ({hours_silent:.1f}h sin interacción)")
 
     def record_interaction(self):
-        self.state.last_interaction = datetime.now().isoformat()
-        self.adjust_trust(2.0, "interacción normal")
-        self.state.energy = max(0.0, self.state.energy - 1.0)
+        with self._lock:
+            self.state.last_interaction = datetime.now().isoformat()
+            self.adjust_trust(2.0, "interacción normal")
+            self.state.energy = max(0.0, self.state.energy - 1.0)
         logging.debug(f"[Energy] −1 → {self.state.energy:.1f}")
 
     def on_positive_moment(self):
@@ -269,7 +337,22 @@ class PersonalityEngine:
             jokes_str   = ", ".join(f'"{j}"' for j in self.state.inside_jokes[-5:])
             jokes_block = f"\nCHISTES INTERNOS: {jokes_str}. Referencialos naturalmente si viene al caso."
 
-        return base + time_block + "\n" + trust_block + mood_block + energy_block + jokes_block + FEW_SHOT_EXAMPLES + RULES
+        # Gustos y disposición. Ambos devuelven "" hasta que hay algo que decir,
+        # así que no ensucian el prompt mientras no se haya formado nada.
+        prefs_block = ""
+        if self._preferences:
+            desc = self._preferences.describe_for_prompt()
+            if desc:
+                prefs_block = "\n\n" + desc
+
+        disposition = self.build_disposition()
+        disposition_block = ("\n\n" + disposition) if disposition else ""
+
+        return (
+            base + time_block + "\n" + trust_block + mood_block + energy_block
+            + jokes_block + prefs_block + disposition_block
+            + FEW_SHOT_EXAMPLES + RULES
+        )
 
     def get_status_summary(self) -> str:
         stage = self.get_trust_stage()

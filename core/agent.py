@@ -13,6 +13,7 @@ from pathlib import Path
 
 from config.settings import settings
 from core.personality import PersonalityEngine
+from core.preferences import PreferenceEngine
 from core.memory import MemoryManager
 from core.llm_factory import get_llm, get_analysis_llm
 from storage.factory import StorageFactory
@@ -62,9 +63,13 @@ class IrisAgent:
         self.personality  = PersonalityEngine(state_storage=self.storage.state)
         self.personality.set_analysis_llm(self.analysis_llm)
 
+        self.preferences = PreferenceEngine(self.storage.preferences)
+        self.personality.set_preferences(self.preferences)
+
         self.memory = MemoryManager(
             analysis_llm = self.analysis_llm,
             storage      = self.storage,
+            preferences  = self.preferences,
         )
 
         self.history = ConversationHistory(self.memory, settings.memory.stm_window)
@@ -215,8 +220,9 @@ class IrisAgent:
     )
 
     def _handle_desktop_control(self, user_input: str, intent: dict, companion_url: str, interface_context: str) -> str:
-        import json, re, base64, requests as _req
-        from core.claude_delegate import ClaudeDelegator, take_desktop_snapshot, execute_desktop_actions
+        import json, re, base64
+        from core.claude_delegate import take_desktop_snapshot, execute_desktop_actions
+        from core.executor import run_claude, desktop_request
         from config.prompts import DESKTOP_LAUNCH_PROMPT, DESKTOP_CONTROL_PROMPT
         from langchain_core.messages import SystemMessage, HumanMessage
 
@@ -226,12 +232,12 @@ class IrisAgent:
         # ── Flujo simple: solo lista de apps, sin screenshot ──────────────────
         if not needs_ui:
             try:
-                apps = _req.get(f"{companion_url}/apps", timeout=5).json().get("apps", [])
+                apps = desktop_request("GET", "/apps", timeout=10).get("apps", [])
             except Exception:
                 apps = []
             apps_text = "\n".join(f"  - {a}" for a in apps) or "  (lista no disponible)"
             prompt = DESKTOP_LAUNCH_PROMPT.format(apps=apps_text, task=task)
-            raw = ClaudeDelegator().run_sync(prompt)
+            raw = run_claude(prompt)
 
         # ── Flujo completo: screenshot + elementos + coords ───────────────────
         else:
@@ -249,13 +255,13 @@ class IrisAgent:
                 width=snap.get("width", "?"), height=snap.get("height", "?"),
                 elements=elements_text, task=task,
             )
-            try:
-                with open(snap.get("wsl_path", ""), "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode()
+            # La captura ya viene en base64 desde donde esté el escritorio
+            b64 = snap.get("image_b64", "")
+            if b64:
                 prompt += f"\n\n[Attached image: screenshot.png]\ndata:image/png;base64,{b64}"
-                raw = ClaudeDelegator().run_sync(prompt)
-            except Exception:
-                raw = ClaudeDelegator().run_sync(prompt, snap.get("wsl_path"))
+                raw = run_claude(prompt)
+            else:
+                raw = run_claude(prompt, snap.get("wsl_path"))
 
         print(f"[Desktop] Acciones recibidas: {raw[:200]}")
 
@@ -300,10 +306,11 @@ class IrisAgent:
         from datetime import datetime, timedelta
         from pathlib import Path
         from core.claude_delegate import (
-            ClaudeDelegator, IntentAgent, _build_prompt,
+            IntentAgent, _build_prompt,
             _IMAGE_EXTENSIONS, _quick_delegate_check, _is_claude_error, _TASK_LABELS,
-            ensure_companion_alive, take_desktop_snapshot, execute_desktop_actions,
+            ensure_companion_alive,
         )
+        from core.executor import run_claude
 
         # ── 1. Pre-filtro heurístico ──────────────────────────────────────────
         if not _quick_delegate_check(user_input, file_path):
@@ -352,8 +359,9 @@ class IrisAgent:
             "mood":        self.personality.state.mood.value,
             "trust_stage": self.personality.get_trust_stage().value,
         }
-        delegator  = ClaudeDelegator()
-        raw_claude = delegator.run_sync(
+        # run_claude decide dónde: aquí mismo en local, o en el portátil vía
+        # WebSocket cuando Iris corre en un servidor.
+        raw_claude = run_claude(
             _build_prompt(user_input, intent, iris_context),
             intent["file_path"],
         )

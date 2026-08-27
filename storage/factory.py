@@ -3,14 +3,16 @@ storage/factory.py
 Inicializa backends de storage con fallback automático.
 
 Prioridad:
-1. Supabase + Neo4j (cloud) — si están disponibles
-2. SQLite + ChromaDB (local) — fallback automático
+1. Supabase (cloud) — historial, estado, vectores, grafo, preferencias y diario
+2. SQLite + ChromaDB (local) — fallback automático, sin grafo
 """
 
 import logging
 
 from storage.base import (
     BaseHistoryStorage,
+    BaseJournalStorage,
+    BasePreferenceStorage,
     BaseStateStorage,
     BaseVectorStorage,
     BaseGraphStorage,
@@ -18,7 +20,7 @@ from storage.base import (
 
 
 class _DummyGraphStorage(BaseGraphStorage):
-    """Graph storage vacío — cuando Neo4j no está disponible."""
+    """Graph storage vacío — cuando no hay Postgres (modo local con SQLite)."""
 
     def add_entity(self, name, entity_type, properties): pass
     def add_relation(self, from_name, relation, to_name, properties=None): pass
@@ -53,13 +55,17 @@ class StorageFactory:
                 from storage.supabase import (
                     init_supabase_schema,
                     SupabaseHistoryStorage,
+                    SupabaseJournalStorage,
+                    SupabasePreferenceStorage,
                     SupabaseStateStorage,
                     SupabaseVectorStorage,
                 )
                 init_supabase_schema()
-                self.history: BaseHistoryStorage = SupabaseHistoryStorage()
-                self.state: BaseStateStorage     = SupabaseStateStorage()
-                self.vector: BaseVectorStorage   = SupabaseVectorStorage()
+                self.history: BaseHistoryStorage         = SupabaseHistoryStorage()
+                self.state: BaseStateStorage             = SupabaseStateStorage()
+                self.vector: BaseVectorStorage           = SupabaseVectorStorage()
+                self.preferences: BasePreferenceStorage  = SupabasePreferenceStorage()
+                self.journal: BaseJournalStorage         = SupabaseJournalStorage()
                 logging.info("[Storage] Supabase conectado.")
                 return
             except Exception as e:
@@ -69,36 +75,50 @@ class StorageFactory:
         # Fallback local
         from storage.sqlite_fallback import (
             SQLiteHistoryStorage,
+            SQLiteJournalStorage,
+            SQLitePreferenceStorage,
             SQLiteStateStorage,
             ChromaVectorStorage,
         )
-        self.history = SQLiteHistoryStorage()
-        self.state   = SQLiteStateStorage()
-        self.vector  = ChromaVectorStorage()
+        self.history     = SQLiteHistoryStorage()
+        self.state       = SQLiteStateStorage()
+        self.vector      = ChromaVectorStorage()
+        self.preferences = SQLitePreferenceStorage()
+        self.journal     = SQLiteJournalStorage()
         logging.info("[Storage] SQLite + ChromaDB activos (modo local).")
 
     def _init_graph(self):
-        """Intenta Neo4j, fallback a dummy silencioso."""
+        """El grafo vive en el mismo Postgres; dummy silencioso si no hay conexión."""
         from config.settings import settings
 
-        neo4j_uri = settings.storage.neo4j_uri
-
-        if neo4j_uri:
+        if settings.storage.database_url:
             try:
-                from storage.neo4j import Neo4jGraphStorage
-                self.graph: BaseGraphStorage = Neo4jGraphStorage()
-                logging.info("[Storage] Neo4j conectado.")
+                from storage.supabase import PostgresGraphStorage
+                self.graph: BaseGraphStorage = PostgresGraphStorage()
+                counts = self.graph.counts()
+                logging.info(
+                    f"[Storage] Grafo: {counts['entities']} entidades, "
+                    f"{counts['relations']} relaciones."
+                )
                 return
             except Exception as e:
-                logging.warning(f"[Storage] Neo4j no disponible: {e}")
+                logging.warning(f"[Storage] Grafo no disponible: {e}")
 
         self.graph = _DummyGraphStorage()
-        logging.info("[Storage] Graph storage desactivado (modo local).")
+        logging.info("[Storage] Grafo desactivado (sin Postgres).")
 
     def close(self):
-        for backend in (self.graph, self.vector, self.history, self.state):
+        for backend in (self.graph, self.vector, self.history, self.state,
+                        self.preferences, self.journal):
             try:
                 if hasattr(backend, "close"):
                     backend.close()
             except Exception:
                 pass
+
+        # El pool es de módulo, no de una instancia: se cierra aparte
+        try:
+            from storage.supabase import close_pool
+            close_pool()
+        except Exception:
+            pass

@@ -91,6 +91,52 @@ def setup_proactive(iris, ui_signals, telegram_active: bool):
         return None
 
 
+def setup_agent_link():
+    """
+    Modo cliente: abre el WebSocket hacia el servidor y ofrece lo que solo se
+    puede hacer aquí — Claude con tu suscripción, y el escritorio.
+    Retorna el AgentClient o None.
+    """
+    if settings.mode.mode != "client":
+        return None
+    try:
+        from core.link.agent import AgentClient
+        from core.executor import build_local_handlers
+
+        client = AgentClient(
+            settings.mode.server_url,
+            settings.mode.agent_token,
+            settings.mode.agent_name,
+        )
+        for (cap, action), handler in build_local_handlers().items():
+            client.register(cap, action, handler)
+        client.start()
+        print(f"[Agente] Conectando a {settings.mode.server_url} — ofrezco {client.capabilities}")
+        return client
+    except Exception as e:
+        print(f"[Agente] No se pudo iniciar el enlace: {e}")
+        return None
+
+
+def run_api_server(iris):
+    """Modo servidor: levanta FastAPI con /chat, /stream y /agent. Bloquea."""
+    import uvicorn
+    from interfaces.http_api import create_api
+
+    app = create_api(iris)
+
+    if settings.telegram.enabled and settings.telegram.bot_token:
+        try:
+            from interfaces.telegram_bot import create_telegram_app
+            app.mount("/tg", create_telegram_app(iris))
+            print("[Telegram] Webhook montado en /tg/webhook")
+        except Exception as e:
+            print(f"[Telegram] No se pudo montar: {e}")
+
+    print(f"[Servidor] Iris escuchando en {settings.server.host}:{settings.server.port}")
+    uvicorn.run(app, host=settings.server.host, port=settings.server.port, log_level="warning")
+
+
 def setup_voice(iris, ui_signals):
     """Inicia el subsistema de voz."""
     print("[Voice] Iniciando sistema de voz...")

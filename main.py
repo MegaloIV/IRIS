@@ -3,6 +3,8 @@ main.py
 Entry point de Iris.
 """
 
+import logging
+import os
 import sys
 import warnings
 import signal
@@ -12,16 +14,81 @@ from PyQt6.QtWidgets import QApplication
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
+
+def _setup_logging():
+    """
+    Sin esto, el nivel raíz de Python es WARNING y TODOS los logging.info del
+    proyecto son invisibles: que Supabase conectó, cuántas memorias hay, qué
+    preferencias se formaron, si el grafo tiene algo dentro. Los fallos se ven,
+    los aciertos no — así es como el grafo estuvo meses sin existir sin que
+    nadie se enterara.
+
+    IRIS_LOG_LEVEL=DEBUG para ver también los ajustes de trust y energía.
+    """
+    level = getattr(logging, os.getenv("IRIS_LOG_LEVEL", "INFO").upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s  %(message)s",
+        datefmt="%H:%M:%S",
+        # force: basicConfig no hace nada si algo ya configuró el root logger, y
+        # varias librerías lo hacen al importarse. Sin esto, el arreglo entero
+        # es un no-op según qué se importe antes.
+        force=True,
+    )
+    # Librerías que hablan demasiado y no dicen nada nuestro
+    for noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub", "filelock",
+                  "sentence_transformers", "transformers", "groq", "telegram",
+                  "apscheduler", "asyncio", "PIL"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+_setup_logging()
+
+from config.settings import settings
+
+
+def run_server():
+    """
+    Modo servidor: sin UI, sin voz, sin ventanas. Solo el cerebro.
+    Lo que necesita estar en el portátil se lo pide al agente por WebSocket.
+    """
+    from core.agent import IrisAgent
+    from core.startup import setup_proactive, run_api_server
+
+    print("=" * 50)
+    print("  IRIS — modo SERVIDOR")
+    print("=" * 50)
+
+    iris = IrisAgent()
+
+    class _NoUI:
+        """El motor proactivo espera señales de UI que aquí no existen."""
+        def __getattr__(self, _):
+            class _Sig:
+                @staticmethod
+                def emit(*a, **k): pass
+            return _Sig()
+
+    setup_proactive(iris, _NoUI(), telegram_active=settings.telegram.enabled)
+    try:
+        run_api_server(iris)
+    finally:
+        iris.shutdown()
+
+
 from ui.avatar import IrisAvatarUI
 from ui.signals import IrisSignals
 from ui.terminal_overlay import TerminalOutputUI
-from core.startup import setup_telegram, setup_proactive, setup_voice
+from core.startup import setup_telegram, setup_proactive, setup_voice, setup_agent_link
 from core.commands import handle_command, dispatch_input
 
 
 def main():
+    if settings.mode.mode == "server":
+        return run_server()
+
     print("=" * 50)
-    print("  IRIS — Iniciando sistema...")
+    print(f"  IRIS — Iniciando sistema... (modo {settings.mode.mode})")
     print("=" * 50)
 
     app = QApplication(sys.argv)
@@ -32,8 +99,16 @@ def main():
     avatar_window.show()
     ui_signals.terminal_output_updated.connect(terminal_window.show_message)
 
-    from core.agent import IrisAgent
-    iris = IrisAgent()
+    if settings.mode.mode == "client":
+        # El cerebro está en el servidor. Instanciar IrisAgent aquí crearía un
+        # segundo agente escribiendo la misma fila de estado y el mismo
+        # historial que el del servidor: dos personalidades pisándose.
+        from core.remote_iris import RemoteIris
+        iris = RemoteIris()
+        print(f"[Iris] Cerebro en {settings.mode.server_url} — aquí solo interfaz, voz y capacidades.")
+    else:
+        from core.agent import IrisAgent
+        iris = IrisAgent()
 
     # Inyecta el emit de mood en el stream de voz sin modificar el agente
     _original_stream = iris.chat_stream_voice
@@ -43,8 +118,15 @@ def main():
         return result
     iris.chat_stream_voice = _hooked_stream
 
-    cf_proc, telegram_active = setup_telegram(iris)
-    proactive_engine         = setup_proactive(iris, ui_signals, telegram_active)
+    # En modo cliente el cerebro está en el servidor: aquí solo se ofrece
+    # Claude y el escritorio, y Telegram/proactivo los lleva el otro lado.
+    agent_link = setup_agent_link()
+
+    if settings.mode.mode == "client":
+        cf_proc, telegram_active, proactive_engine = None, False, None
+    else:
+        cf_proc, telegram_active = setup_telegram(iris)
+        proactive_engine         = setup_proactive(iris, ui_signals, telegram_active)
     setup_voice(iris, ui_signals)
 
     print(f"\n[Sistema listo] — {iris.personality.get_status_summary()}")
@@ -58,7 +140,9 @@ def main():
     def handle_ui_input(user_input: str, attached_file: str = ""):
         print(f"\nTú (UI): {user_input}")
         if user_input.startswith("/"):
-            ui_signals.terminal_output_updated.emit(handle_command(user_input, iris))
+            out = (iris.run_command(user_input) if settings.mode.mode == "client"
+                   else handle_command(user_input, iris))
+            ui_signals.terminal_output_updated.emit(out)
             return
 
         def worker():
@@ -108,7 +192,8 @@ def main():
                 if not user_input:
                     continue
                 if user_input.startswith("/"):
-                    print(handle_command(user_input, iris))
+                    print(iris.run_command(user_input) if settings.mode.mode == "client"
+                          else handle_command(user_input, iris))
                     continue
 
                 print("\nIris: ", end="", flush=True)
@@ -141,6 +226,8 @@ def main():
         print("\n\n[Iris] Guardando memorias antes de cerrar...")
         if proactive_engine:
             proactive_engine.stop()
+        if agent_link:
+            agent_link.stop()
         iris.shutdown()
         if cf_proc:
             cf_proc.kill()

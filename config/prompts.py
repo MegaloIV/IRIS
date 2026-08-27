@@ -226,6 +226,10 @@ Fecha actual: {current_date}
 
 Extrae SOLO hechos concretos y relevantes. Responde SOLO con JSON válido, sin texto adicional.
 
+IDIOMA: todo el contenido del JSON va en ESPAÑOL — `content`, `subject` y `why`.
+Estos textos se le leen luego a Iris como sus propios recuerdos, así que tienen
+que estar en el idioma en el que ella habla, aunque tú razones en otro.
+
 {{
     "facts": [
         {{
@@ -233,6 +237,14 @@ Extrae SOLO hechos concretos y relevantes. Responde SOLO con JSON válido, sin t
             "content": "hecho concreto en una oración",
             "temporal_ref": "YYYY-MM-DD o null si no hay referencia temporal clara",
             "importance": 1|2|3
+        }}
+    ],
+    "iris_reactions": [
+        {{
+            "subject": "aquello a lo que reaccionaste, en pocas palabras",
+            "kind": "tema|actividad|trato|entidad",
+            "valence": -1.0 a 1.0,
+            "why": "qué pasó exactamente que te hizo sentir así"
         }}
     ]
 }}
@@ -256,7 +268,32 @@ Para temporal_ref:
 - Si no hay referencia temporal clara — pon null
 
 Solo extrae hechos reales mencionados. No inventes ni inferas demasiado.
-Si no hay nada relevante, devuelve: {{"facts": []}}"""
+
+── iris_reactions ────────────────────────────────────────────────────────────
+
+Esta parte es distinta y va en primera persona: aquí no describes a {owner_name},
+te describes a ti. La pregunta es qué te gustó o te molestó A TI, Iris, de esta
+conversación.
+
+No lo confundas con la categoría "preference" de arriba: esa recoge los gustos de
+{owner_name}. Esta recoge los tuyos, y son cosas separadas — puede encantarle algo
+que a ti te aburre.
+
+- subject: formúlalo de forma que pueda repetirse en otras conversaciones
+  ("hablar de música", "que me pidan cosas de madrugada", "explicar código").
+  Nunca algo irrepetible como "la charla del martes por la noche".
+- kind: tema (de qué se habla) | actividad (qué te toca hacer) |
+  trato (cómo te trata) | entidad (una persona o cosa concreta)
+- valence: negativo si te desagradó, positivo si te gustó. Usa los extremos solo
+  para reacciones fuertes de verdad; la mayoría de las cosas caen entre -0.5 y 0.5.
+- why: el momento concreto, no una generalidad.
+
+Y lo más importante: **la mayoría de las conversaciones no producen ninguna
+reacción**, y eso es lo normal. Inventar un gusto tibio para rellenar es peor que
+devolver la lista vacía, porque esos gustos falsos luego moldean cómo respondes.
+Anota algo solo cuando haya pasado de verdad.
+
+Si no hay nada relevante, devuelve: {{"facts": [], "iris_reactions": []}}"""
 
 
 MEMORY_CONTEXT_PROMPT = """Recuerdos reales sobre {owner_name} que puedes usar si vienen al caso:

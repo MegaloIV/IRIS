@@ -8,9 +8,11 @@ if not exist "venv\Scripts\python.exe" (
     venv\Scripts\pip install -r requirements.txt
 )
 
-:: Abrir puerto 7891 en el firewall para WSL2
+:: Abrir el puerto 7891 SOLO para el rango de WSL2, no para toda la red.
+:: Aun asi el companion exige token en cada peticion (ver auth.py) — el
+:: firewall es la segunda capa, no la unica.
 netsh advfirewall firewall delete rule name="Iris Companion" >nul 2>&1
-netsh advfirewall firewall add rule name="Iris Companion" dir=in action=allow protocol=TCP localport=7891 >nul 2>&1
+netsh advfirewall firewall add rule name="Iris Companion" dir=in action=allow protocol=TCP localport=7891 remoteip=172.16.0.0/12,127.0.0.1 >nul 2>&1
 
 :: Matar cualquier proceso que ocupe el puerto 7891
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":7891 "') do (

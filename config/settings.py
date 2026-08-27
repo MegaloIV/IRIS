@@ -59,9 +59,6 @@ class StorageConfig(BaseModel):
     database_url: str = os.getenv("DATABASE_URL", "")
     supabase_url: str = os.getenv("SUPABASE_URL", "")
     supabase_key: str = os.getenv("SUPABASE_KEY", "")
-    neo4j_uri: str = os.getenv("NEO4J_URI", "")
-    neo4j_user: str = os.getenv("NEO4J_USER", "neo4j")
-    neo4j_password: str = os.getenv("NEO4J_PASSWORD", "")
 
 
 class VoiceConfig(BaseModel):
@@ -69,7 +66,14 @@ class VoiceConfig(BaseModel):
     elevenlabs_keys: str = os.getenv("ELEVENLABS_KEYS", "")
     elevenlabs_voice_ids: str = os.getenv("ELEVENLABS_VOICE_IDS", "21m00Tcm4TlvDq8ikWAM") # Rachel por defecto
 
-    # STT — faster-whisper
+    # STT — dónde se transcribe
+    #   auto  — groq si Iris corre en servidor, faster-whisper si es local
+    #   groq  — API, sin modelo cargado en ninguna máquina
+    #   local — faster-whisper en esta máquina
+    stt_backend: str = os.getenv("STT_BACKEND", "auto").lower()
+    stt_remote_model: str = os.getenv("STT_REMOTE_MODEL", "whisper-large-v3-turbo")
+
+    # STT — faster-whisper (solo si stt_backend acaba siendo local)
     stt_model: str = os.getenv("STT_MODEL", "small")
     stt_language: str = os.getenv("STT_LANGUAGE", "es")
     stt_device: str = os.getenv("STT_DEVICE", "cuda")
@@ -79,6 +83,18 @@ class VoiceConfig(BaseModel):
 
 class ClaudeConfig(BaseModel):
     bin_path: str = os.getenv("CLAUDE_BIN_PATH", "/home/matias/.npm-global/bin/claude")
+
+    # Herramientas que Iris puede usar sin pedir permiso. Sustituye a
+    # --dangerously-skip-permissions, que autorizaba también Bash — es decir,
+    # cualquier comando que se le ocurriera a un LLM, incluido borrar cosas.
+    #
+    # Con esta lista puede leer, escribir y buscar archivos, que es lo que
+    # necesitan sus tareas reales. Si alguna vez hace falta ejecutar comandos,
+    # añade Bash aquí a conciencia, o mejor acotado: Bash(git status *)
+    allowed_tools: str = os.getenv(
+        "CLAUDE_ALLOWED_TOOLS",
+        "Read,Write,Edit,Glob,Grep,WebSearch,WebFetch",
+    )
 
 
 class CompanionConfig(BaseModel):
@@ -90,6 +106,35 @@ class CompanionConfig(BaseModel):
 class ServerConfig(BaseModel):
     host: str = os.getenv("SERVER_HOST", "0.0.0.0")
     port: int = int(os.getenv("SERVER_PORT", "8000"))
+
+
+class ModeConfig(BaseModel):
+    """
+    Dónde vive Iris.
+
+    local   — todo en un proceso, como siempre. Es el valor por defecto, así que
+              nada cambia hasta que tú lo cambies.
+    server  — el cerebro: agente, memoria, Telegram. Delega en el portátil lo
+              que necesita estar allí (Claude, escritorio) vía WebSocket.
+    client  — el portátil: avatar, micro, altavoz, y las capacidades que ofrece
+              al servidor. Se conecta hacia fuera; no escucha nada.
+    """
+    mode: str = os.getenv("IRIS_MODE", "local").lower()
+    server_url: str = os.getenv("IRIS_SERVER_URL", "http://localhost:8000")
+    agent_token: str = os.getenv("IRIS_AGENT_TOKEN", "")
+    agent_name: str = os.getenv("IRIS_AGENT_NAME", "portatil")
+
+    def model_post_init(self, __context):
+        if self.mode not in ("local", "client", "server"):
+            raise ValueError(
+                f"IRIS_MODE='{self.mode}' no es válido. Usa local, client o server."
+            )
+        if self.mode in ("client", "server") and not self.agent_token:
+            raise ValueError(
+                f"IRIS_MODE={self.mode} necesita IRIS_AGENT_TOKEN en el .env. "
+                "Genera uno con: python -c \"import secrets;print(secrets.token_urlsafe(32))\" "
+                "y pon el MISMO valor en las dos máquinas."
+            )
 
 
 _raw_owner_id = os.getenv("TELEGRAM_OWNER_ID", "")
@@ -114,6 +159,7 @@ class Settings(BaseModel):
     claude: ClaudeConfig = ClaudeConfig()
     companion: CompanionConfig = CompanionConfig()
     server: ServerConfig = ServerConfig()
+    mode: ModeConfig = ModeConfig()
     telegram: TelegramConfig = TelegramConfig()
 
 

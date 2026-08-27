@@ -1,0 +1,41 @@
+# Despliegue de Iris en modo servidor.
+#
+# A propósito nada específico de Google Cloud: es una VM normal con Docker, así
+# que el día que se acabe el crédito puedes mudarte a otro VPS o volver a local
+# sin migrar nada.
+#
+# La base de datos NO está aquí — vive en Supabase. Así recrear la instancia no
+# se lleva por delante la memoria de Iris.
+
+services:
+  iris:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      IRIS_MODE: server
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8000
+    expose:
+      - "8000"
+    labels:
+      caddy: ${IRIS_DOMAIN:-iris.localhost}
+      caddy.reverse_proxy: "{{upstreams 8000}}"
+
+  # TLS automático y dominio estable: con esto desaparece el baile de
+  # cloudflared, que daba una URL distinta en cada arranque y obligaba a
+  # re-registrar el webhook de Telegram cada vez.
+  caddy:
+    image: lucaslorentz/caddy-docker-proxy:2.9-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      CADDY_INGRESS_NETWORKS: default
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - caddy_data:/data
+
+volumes:
+  caddy_data:

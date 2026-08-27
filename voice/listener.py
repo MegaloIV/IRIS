@@ -8,20 +8,26 @@ import threading
 import queue
 from typing import Callable
 
-from voice.stt import STTEngine
+from voice.stt import STTEngine, build_stt, record_utterance
 from voice.tts import TTSEngine
 from voice.toggle import VoiceToggle
 
 
 class VoiceListener:
 
-    # Añadimos on_speaking_sentence al constructor
     def __init__(self, on_text_input: Callable, on_speaking_sentence: Callable = None,
-                 on_listening_changed: Callable = None):
+                 on_listening_changed: Callable = None, on_audio_input: Callable = None):
+        """
+        on_audio_input: si se pasa, el audio crudo se manda tal cual en vez de
+        transcribirlo aquí. Es lo que permite que el portátil no cargue ningún
+        modelo de voz — graba, detecta el silencio, y el servidor transcribe.
+        """
         self.on_text_input        = on_text_input
+        self.on_audio_input       = on_audio_input
         self.on_speaking_sentence = on_speaking_sentence
         self.on_listening_changed = on_listening_changed
-        self.stt           = STTEngine()
+        # Sin transcripción local no hace falta cargar Whisper
+        self.stt           = None if on_audio_input else build_stt()
         self.tts           = TTSEngine()
         self.tts_enabled   = True
         self._loop_lock    = threading.Lock()
@@ -56,23 +62,29 @@ class VoiceListener:
         with self._loop_lock:
             while self.toggle.listening:
                 try:
-                    text = self.stt.record_and_transcribe(
-                        stop_flag = lambda: not self.toggle.listening
-                    )
+                    stop = lambda: not self.toggle.listening
 
-                    if not text:
-                        if not self.toggle.listening:
-                            break
-                        continue
-
-                    print(f"\n[Voice] Tu: {repr(text)}")
-                    self._respond(text)
+                    if self.on_audio_input:
+                        wav = record_utterance(stop_flag=stop)
+                        if not wav:
+                            if not self.toggle.listening:
+                                break
+                            continue
+                        self._respond(wav, audio=True)
+                    else:
+                        text = self.stt.record_and_transcribe(stop_flag=stop)
+                        if not text:
+                            if not self.toggle.listening:
+                                break
+                            continue
+                        print(f"\n[Voice] Tu: {repr(text)}")
+                        self._respond(text)
 
                 except Exception as e:
                     logging.error(f"[Voice] Error en loop: {e}")
                     break
 
-    def _respond(self, text: str):
+    def _respond(self, payload, audio: bool = False):
         sentence_queue = queue.Queue()
         stop_signal    = object()
 
@@ -81,7 +93,8 @@ class VoiceListener:
 
         def llm_thread():
             try:
-                full = self.on_text_input(text, on_sentence)
+                handler = self.on_audio_input if audio else self.on_text_input
+                full = handler(payload, on_sentence)
                 print(f"[Voice] Iris: {repr(full)}")
             except Exception as e:
                 logging.error(f"[Voice] Error LLM: {e}")

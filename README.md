@@ -24,8 +24,8 @@ IRIS/
 │   ├── __init__.py
 │   ├── base.py                       # Interfaces abstractas (ABC)
 │   ├── factory.py                    # Inicializa todos los backends
-│   ├── supabase.py                   # History + State + Vectores
-│   └── neo4j.py                      # Grafo de conocimiento
+│   └── supabase.py                   # History + State + Vectores + Grafo
+│                                     #   + Preferencias + Diario
 │
 ├── voice/
 │   ├── __init__.py
@@ -54,7 +54,7 @@ main.py
   │     │     ├── SupabaseHistoryStorage   → PostgreSQL (historial)
   │     │     ├── SupabaseStateStorage     → PostgreSQL (estado emocional)
   │     │     ├── SupabaseVectorStorage    → pgvector (memorias semánticas)
-  │     │     └── Neo4jGraphStorage        → Neo4j AuraDB (grafo)
+  │     │     └── PostgresGraphStorage      → PostgreSQL (grafo)
   │     │
   │     ├── PersonalityEngine()
   │     │     ├── EmotionalState           → mood, trust, energy
@@ -64,7 +64,7 @@ main.py
   │     ├── MemoryManager()
   │     │     ├── STM                      → RAM (conversación activa)
   │     │     ├── LTM vectorial            → Supabase pgvector
-  │     │     └── LTM grafo                → Neo4j
+  │     │     └── LTM grafo                → PostgreSQL
   │     │
   │     ├── LangGraph (4 nodos)
   │     │     ├── analyze_input            → LLM clasifica el mensaje
@@ -130,7 +130,7 @@ Supabase (PostgreSQL) — historial persistente
 LLM extrae hechos de la sesión
         │
         ├──▶ pgvector  — hechos semánticos con fecha
-        └──▶ Neo4j     — entidades y relaciones
+        └──▶ Postgres  — entidades y relaciones
         │
         │ Al reiniciar el programa
         ▼
@@ -142,9 +142,8 @@ Carga últimos 40 mensajes de Supabase → reconstruye STM
 ## 🌐 Servicios externos
 
 ```
-Groq API       — LLM principal (llama-3.3-70b) + análisis (llama-3.1-8b-instant)
-Supabase       — PostgreSQL + pgvector
-Neo4j AuraDB   — Grafo de conocimiento
+Groq API       — LLM principal (gpt-oss-120b) + análisis (gpt-oss-20b)
+Supabase       — PostgreSQL + pgvector (historial, vectores y grafo)
 ```
 
 ---
@@ -154,8 +153,8 @@ Neo4j AuraDB   — Grafo de conocimiento
 ```env
 # LLM
 LLM_PROVIDER=groq
-LLM_MODEL=llama-3.3-70b-versatile
-LLM_ANALYSIS_MODEL=llama-3.1-8b-instant
+LLM_MODEL=openai/gpt-oss-120b
+LLM_ANALYSIS_MODEL=openai/gpt-oss-20b
 LLM_TEMPERATURE=0.85
 GROQ_API_KEY=
 
@@ -164,10 +163,6 @@ SUPABASE_URL=
 SUPABASE_KEY=
 DATABASE_URL=postgresql://postgres:[PASSWORD]@db.xxxx.supabase.co:5432/postgres
 
-# Neo4j AuraDB
-NEO4J_URI=neo4j+s://xxxx.databases.neo4j.io
-NEO4J_USER=xxxx
-NEO4J_PASSWORD=
 
 # Iris
 IRIS_OWNER_NAME=Matias
@@ -223,7 +218,7 @@ config.yaml        # ya no se usa, puedes borrarlo
 ## 🗺️ Fases completadas
 
 - ✅ Fase 1 — Core conversacional (LangGraph + personalidad + trust)
-- ✅ Fase 2 — Memoria LTM (Supabase pgvector + Neo4j GraphRAG)
+- ✅ Fase 2 — Memoria LTM (Supabase pgvector + grafo en PostgreSQL)
 - ✅ Fase 3 — Voz (Whisper STT + Coqui/Edge TTS + OpenWakeWord)
 - ⏳ Fase 4 — Avatar 2D
 - ⏳ Fase 5 — Herramientas (control del PC, Spotify, VSCode, etc.)

@@ -1,0 +1,18 @@
+# Dependencias del modo servidor. Sin UI, sin audio, sin control de escritorio.
+langchain>=0.2.0
+langchain-community>=0.2.0
+langchain-groq>=0.1.0
+langgraph>=0.1.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+psycopg2-binary>=2.9.0
+sentence-transformers>=2.2.0
+
+fastapi>=0.100.0
+uvicorn>=0.20.0
+websockets>=12.0
+requests>=2.31.0
+
+python-telegram-bot>=21.0
+apscheduler>=3.10.0

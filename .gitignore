@@ -1,5 +1,7 @@
 # Secrets
 .env
+.env.*
+!.env.example
 
 # Python
 venv/
@@ -29,6 +31,7 @@ data/chromadb/
 .DS_Store
 Thumbs.db
 
+companion/.iris_token
 keys.txt
 
 CLAUDE.md

@@ -36,6 +36,17 @@ class TTSEngine:
         
         self.current_key_index = 0
 
+        # La voz NO se indexa con la clave. Antes se usaba current_key_index
+        # para elegir voice_id, así que agotar una clave le cambiaba la voz a
+        # Iris a mitad de respuesta. Son dos cosas independientes: la clave es
+        # con qué cuenta pagas, la voz es quién suena.
+        self.voice_id = self.voice_ids[0] if self.voice_ids else ""
+        if len(self.voice_ids) > 1:
+            logging.info(
+                f"[TTS] {len(self.voice_ids)} voice IDs configurados; se usa el primero. "
+                "Deja solo uno en ELEVENLABS_VOICE_IDS si quieres evitar la ambigüedad."
+            )
+
         if not self.api_keys:
             logging.warning("[TTS] ADVERTENCIA: No se configuraron ELEVENLABS_KEYS en el .env")
         else:
@@ -61,15 +72,9 @@ class TTSEngine:
         """Sintetiza audio y devuelve un array NumPy y el sample rate."""
         while True:
             api_key = self._get_current_key()
-            
-            current_voice_id = (
-                self.voice_ids[self.current_key_index]
-                if self.current_key_index < len(self.voice_ids)
-                else self.voice_ids[0]
-            )
 
             # Pedimos formato pcm_24000 para que sea compatible directo con sounddevice
-            url = f"https://api.elevenlabs.io/v1/text-to-speech/{current_voice_id}?output_format=pcm_24000"
+            url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}?output_format=pcm_24000"
             
             headers = {
                 "Accept": "audio/pcm",
@@ -87,7 +92,9 @@ class TTSEngine:
             }
 
             try:
-                response = requests.post(url, json=data, headers=headers)
+                # Sin timeout, una API colgada dejaba el hilo de TTS bloqueado
+                # para siempre e Iris se quedaba muda sin dar ningún error.
+                response = requests.post(url, json=data, headers=headers, timeout=(5, 45))
 
                 if response.status_code == 200:
                     # Convertir los bytes PCM de 16 bits a float32 (lo que espera sounddevice)
@@ -102,6 +109,9 @@ class TTSEngine:
                     logging.error(f"[TTS] Error API ElevenLabs ({response.status_code}): {response.text}")
                     return np.array([]), 24000
                     
+            except requests.Timeout:
+                logging.error("[TTS] ElevenLabs no respondió a tiempo — se omite esta frase.")
+                return np.array([]), 24000
             except Exception as e:
                 if "agotado" in str(e).lower():
                     raise e
