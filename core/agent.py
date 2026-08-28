@@ -17,7 +17,7 @@ from core.personality import PersonalityEngine
 from core.preferences import PreferenceEngine
 from core.journal import JournalKeeper
 from core.memory import MemoryManager
-from core.llm_factory import get_llm, get_analysis_llm, get_fast_llm
+from core.llm_factory import get_llm, get_analysis_llm, get_fast_llm, get_extraction_llm
 from storage.factory import StorageFactory
 from core.utils.history import ConversationHistory
 from core.utils.context import build_messages
@@ -40,6 +40,28 @@ def _capabilities_context() -> str:
         return "[TUS CAPACIDADES — úsalas solo si el usuario pregunta qué puedes hacer o hablan de tus habilidades]:\n" + content
     except Exception:
         return ""
+
+
+def _sin_duplicar(texto: str) -> str:
+    """
+    Colapsa una respuesta que salió literalmente dos veces seguidas.
+
+    Esto es un parche de síntoma, no un arreglo: aparece en torno al 5% de los
+    turnos y no he logrado reproducirlo a voluntad — doce llamadas seguidas
+    salieron limpias, con el mismo prompt, tanto por el grafo como llamando al
+    modelo directamente. Se queda porque lo ve el usuario y porque colapsar un
+    texto que es exactamente su propia mitad repetida no puede romper ninguna
+    respuesta legítima. Si algún día se reproduce, la causa sigue sin buscar.
+    """
+    t = (texto or "").strip()
+    if len(t) < 30:
+        return t
+    mitad = len(t) // 2
+    a, b = t[:mitad].strip(), t[mitad:].strip()
+    if a and a == b:
+        logging.warning("[Iris] Respuesta duplicada colapsada.")
+        return a
+    return t
 
 
 def _is_capability_question(text: str) -> bool:
@@ -79,6 +101,7 @@ class IrisAgent:
             analysis_llm = self.analysis_llm,
             storage      = self.storage,
             preferences  = self.preferences,
+            extraction_llm = get_extraction_llm(),
         )
 
         self.history = ConversationHistory(self.memory, settings.memory.stm_window)
@@ -116,11 +139,61 @@ class IrisAgent:
         por voz no se inyectaba, así que preguntarle «¿puedes ver mi pantalla?»
         en alto le daba una respuesta peor que escribirlo.
         """
-        memoria = self.memory.get_relevant_memories(text)
+        partes = []
+        if memoria := self.memory.get_relevant_memories(text):
+            partes.append(memoria)
         if _is_capability_question(text):
             if caps := _capabilities_context():
-                return (memoria + "\n\n" + caps).strip() if memoria else caps
-        return memoria
+                partes.append(caps)
+        # Lo que pensó ella por su cuenta y viene a cuento. Va aquí y no en cada
+        # canal por separado porque si no se olvida en alguno — que es justo lo
+        # que pasaba con capabilities.md.
+        if diario := self._algo_del_diario(text):
+            partes.append(diario)
+        if evitar := self._evitar_repetirse():
+            partes.append(evitar)
+        return "\n\n".join(partes)
+
+    def _evitar_repetirse(self) -> str:
+        """
+        Le pone delante su última respuesta para que no la calque.
+
+        La regla de "no te repitas" lleva tres redacciones en el prompt y sigue
+        abriendo dos turnos seguidos igual —"Qué cínico…", "Otra ronda…, ¿no?"—.
+        Y es lógico: su respuesta anterior está en la ventana del historial, pero
+        ahí es una línea más entre veinte. Enseñársela aparte y señalarla es una
+        instrucción concreta sobre un texto concreto, y eso sí lo cumple.
+        """
+        for m in reversed(self.history.get_window()):
+            if isinstance(m, AIMessage) and (texto := (m.content or "").strip()):
+                return (
+                    f'[LO ÚLTIMO QUE DIJISTE]: "{texto[:200]}"\n'
+                    "No empieces igual ni uses la misma construcción. Si aquello fue "
+                    "un comentario irónico, ahora prueba con otra cosa: una frase seca, "
+                    "una pregunta, un detalle de lado. Sonar siempre igual cansa más "
+                    "que estar sosa un turno."
+                )
+        return ""
+
+    def _cerrar_diario(self, respuesta: str) -> None:
+        """Si acabó sacando lo que había pensado, que quede como contado."""
+        diario = getattr(self, "journal", None)
+        if not diario:
+            return
+        try:
+            diario.registrar_si_lo_conto(respuesta or "")
+        except Exception as e:
+            logging.debug(f"[Diario] No pude comprobar si lo contó: {e}")
+
+    def _algo_del_diario(self, text: str) -> str:
+        diario = getattr(self, "journal", None)
+        if not diario:
+            return ""
+        try:
+            return diario.algo_que_contar(text)
+        except Exception as e:
+            logging.warning(f"[Diario] No pude mirar si tenía algo que contar: {e}")
+            return ""
 
     # ─── Nodos ────────────────────────────────────────────────────────────────
 
@@ -170,7 +243,11 @@ class IrisAgent:
         if hasattr(user_msg, "content") and hasattr(ai_msg, "content"):
             self.history.append_turn(user_msg.content, ai_msg.content)
         self.personality.save_state()
-        return state
+        # `messages` lleva el reductor operator.add, así que lo que devuelve un
+        # nodo se SUMA a lo que ya había. Devolver `state` entero le sumaba la
+        # lista a sí misma: un turno entraba con 1 mensaje y salía con 4. Este
+        # nodo no cambia nada del estado, así que no devuelve nada.
+        return {}
 
     # ─── Interfaz pública ─────────────────────────────────────────────────────
 
@@ -187,7 +264,15 @@ class IrisAgent:
         }
         result      = self.graph.invoke(initial_state)
         ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage)]
-        return ai_messages[-1].content if ai_messages else "..."
+        texto       = _sin_duplicar((ai_messages[-1].content or "").strip() if ai_messages else "")
+        self._cerrar_diario(texto)
+        if not texto:
+            # Pasa de vez en cuando con el modelo. Lo que no puede pasar es que
+            # se guarde: un turno vacío en el historial le enseña al modelo que
+            # callarse es una respuesta válida, y a partir de ahí se repite.
+            logging.warning("[Iris] El modelo devolvió una respuesta vacía.")
+            return "..."
+        return texto
 
     def chat_stream_voice(self, user_input: str, on_sentence: Callable[[str], None]) -> str:
         """
@@ -214,6 +299,7 @@ class IrisAgent:
         msgs          = build_messages(system_content, memory_context, self.history.get_window(), HumanMessage(content=user_input))
         full_response = stream_sentences(self.llm, msgs, on_sentence)
 
+        self._cerrar_diario(full_response)
         self.history.append_turn(user_input, full_response)
         self.personality.save_state()
         return full_response
@@ -619,6 +705,7 @@ class IrisAgent:
         # ── 6. La respuesta de Claude ya es la de Iris ────────────────────────
         self._claude_session = (claude.session_id, self._personality_snapshot())
         response_text        = claude.text
+        self._cerrar_diario(response_text)
 
         self.history.append_turn(user_input, response_text)
         self.personality.save_state()

@@ -775,6 +775,14 @@ strength += 0.15*(1-strength)</code></pre>
         <p>Es el patrón de la fase 00 otra vez, con una vuelta de tuerca: <strong>no estaba roto, iba a romperse al desplegar</strong>. Lo que lo protegía no era el código, era que la URL no duraba lo suficiente como para que valiera la pena buscarla.</p>
       </div>
 
+      <div class="thesis warn prose" style="margin:1.5rem 0">
+        <div class="eyebrow">El patrón, por quinta vez</div>
+        <p class="big">La capa de grafo nunca guardó una sola fila.</p>
+        <p>Cero entidades y cero relaciones después de 96 mensajes. La causa, medida: el modelo de 20B <strong>no consigue producir JSON válido</strong> para <code>GRAPH_EXTRACTION_PROMPT</code> — un objeto anidado de entidades y relaciones, 2.184 caracteres de prompt — y Groq rechaza la generación entera con <code>json_validate_failed</code>. El de 120B lo hace a la primera, tres de tres. Corre una vez cada 20 mensajes, así que el modelo grande aquí no se nota.</p>
+        <p>Lo que lo mantuvo invisible es lo de siempre: falla dentro de un <code>try/except</code>, en un hilo de fondo, y <em>sí</em> lo decía —«Grafo: 0 entidades»— en medio de otras seis líneas de arranque igual de tranquilas. Un dato correcto no es un aviso. Ahora, si hay memorias y el grafo está vacío, sale como <code>WARNING</code> y dice dónde mirar.</p>
+        <p>Con la capa viva aparecen dos defectos que solo existían porque nunca se había usado: <code>stored_at</code> viene en UTC y se comparaba con la hora local sin convertir, así que un recuerdo de hace un minuto salía como <strong>«hace −1 días»</strong> en su propio prompt; y el traversal invierte las aristas para poder recorrerlas en ambos sentidos, pero el renderizado no lo sabía y le escribía <strong>«Halcón DESARROLLA Lucía»</strong>, la frase del revés. Los dos arreglados — y los dos son cosas que solo se ven cuando algo de verdad funciona.</p>
+      </div>
+
       <p><strong>Fase 06 cerrada: ya le pasan cosas cuando no estás.</strong> Cada 20–40 minutos —con jitter, porque media hora exacta se nota y parece un cron— Iris se despierta y hace algo suyo: desarrolla una postura sobre algo reciente, cruza dos recuerdos que nunca habían estado juntos, formula una pregunta que le da curiosidad de verdad, o se va a curiosear un archivo tuyo con permisos de solo lectura. Lo anota en <code>iris_journal</code> y sigue a lo suyo. Escribirte es una de las respuestas posibles, no la pregunta.</p>
 
       <div class="thesis prose" style="margin:1.5rem 0">

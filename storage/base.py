@@ -108,6 +108,16 @@ class BaseJournalStorage(ABC):
     def top_unshared(self) -> Optional[dict]: ...
 
     @abstractmethod
+    def pending(self, min_impulse: float = 0.0, limit: int = 2) -> list[dict]:
+        """
+        Lo que aún no ha contado y más ganas tiene de contar, por impulso.
+
+        Es lo que permite que saque en conversación algo que pensó ella, en vez
+        de que el diario solo salga cuando lleva horas sin hablar con nadie.
+        """
+        ...
+
+    @abstractmethod
     def mark_shared(self, entry_id: int) -> None: ...
 
     @abstractmethod

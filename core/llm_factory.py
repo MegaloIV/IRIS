@@ -141,17 +141,48 @@ def get_fast_llm(temperature: float = 0.8):
     return _RotatingGroqLLM(keys=keys, model=model, temperature=temperature)
 
 
-def get_analysis_llm():
-    """Modelo rápido para análisis, clasificación y extracción (forzado a JSON)."""
+def get_json_llm(model: str):
+    """
+    Cliente que devuelve JSON garantizado, sobre el modelo que se le diga.
+
+    `response_format: json_object` obliga a que la salida sea JSON válido — y a
+    que el prompt contenga la palabra "json", o la API responde 400.
+    """
     keys = settings.llm.api_keys
     if not keys:
         raise ValueError("No hay API keys de Groq configuradas. Define GROQ_API_KEYS en .env")
 
     json_kwargs = {"model_kwargs": {"response_format": {"type": "json_object"}}}
-    model       = settings.llm.analysis_model
-
     if len(keys) == 1:
         from langchain_groq import ChatGroq
         return ChatGroq(model=model, temperature=0.0, api_key=keys[0], **json_kwargs)
-
     return _RotatingGroqLLM(keys=keys, model=model, temperature=0.0, **json_kwargs)
+
+
+def get_analysis_llm():
+    """Modelo rápido para análisis, clasificación y extracción (forzado a JSON)."""
+    return get_json_llm(settings.llm.analysis_model)
+
+
+def get_extraction_llm():
+    """
+    El modelo GRANDE, forzado a JSON, para sacar conocimiento de la conversación:
+    memorias a largo plazo y grafo de entidades.
+
+    La división que sigue el sistema no es "grande para lo importante", sino por
+    frecuencia y por si hace falta juicio:
+
+      analysis_llm (20B) — una vez por MENSAJE: humor, intención. Rápido y barato.
+      este (120B)        — una vez cada 20 mensajes: qué merece recordarse.
+
+    Y con el pequeño no funcionaba. El grafo llevaba vacío desde que existe
+    porque el de 20B no lograba producir JSON válido para un objeto anidado
+    —Groq rechazaba la generación entera con `json_validate_failed`— y la
+    extracción de memorias, aun cuando no fallaba, guardaba lo que no debía:
+    convertía un "abre Spotify" en "prefiere Spotify para escuchar música".
+
+    Decidir qué de una conversación seguirá importando dentro de seis meses es
+    un juicio, no una clasificación. Y corriendo una vez cada 20 mensajes, el
+    modelo grande aquí no se nota ni en la factura ni en la latencia.
+    """
+    return get_json_llm(settings.llm.model)

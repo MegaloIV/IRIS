@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
+from core.llm_factory import get_extraction_llm
 from config.settings import settings
 from config.prompts import (
     MEMORY_EXTRACTION_PROMPT,
@@ -31,8 +32,13 @@ def _relative_date(date_str) -> str:
         else:
             date = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
         if hasattr(date, "tzinfo") and date.tzinfo:
-            date = date.replace(tzinfo=None)
+            # astimezone() antes de quitar el tzinfo, no replace() a secas.
+            # Postgres devuelve UTC y datetime.now() es local: quitando la zona
+            # sin convertir, un recuerdo guardado hace un minuto salía como
+            # "hace -1 días" — y eso acababa escrito en su prompt.
+            date = date.astimezone().replace(tzinfo=None)
         delta = datetime.now() - date
+        if delta.days < 0:        return "hoy"   # relojes desalineados
         if delta.days == 0:       return "hoy"
         elif delta.days == 1:     return "ayer"
         elif delta.days < 7:      return f"hace {delta.days} días"
@@ -141,8 +147,13 @@ class MemoryManager:
 
     EXTRACT_EVERY = 20  # mensajes entre extracciones
 
-    def __init__(self, analysis_llm, storage, preferences=None):
-        self.analysis_llm = analysis_llm
+    def __init__(self, analysis_llm, storage, preferences=None, extraction_llm=None):
+        # analysis_llm corre una vez por mensaje (relevancia); extraction_llm una
+        # vez cada 20 (memorias y grafo) y necesita el modelo grande — ver
+        # get_extraction_llm(). Si no lo pasan se construye aquí en vez de caer
+        # al de análisis: caer sería volver al fallo silencioso de siempre.
+        self.analysis_llm   = analysis_llm
+        self.extraction_llm = extraction_llm or get_extraction_llm()
         self.storage      = storage
         self.preferences  = preferences   # PreferenceEngine, opcional
         self.owner_name   = settings.iris.owner_name
@@ -157,7 +168,31 @@ class MemoryManager:
         self._entity_matcher = _EntityMatcher(self.storage.graph)
 
         self._purgar_caducadas()
-        logging.info(f"[Memory] Iniciada — {self.storage.vector.count()} memorias vectoriales")
+        self._avisar_si_hay_capas_muertas()
+
+    def _avisar_si_hay_capas_muertas(self) -> None:
+        """
+        Que una capa vacía lo diga fuerte, no en una línea informativa más.
+
+        El grafo llevaba sin guardar una sola fila desde que existe, y sí que lo
+        decía —«Grafo: 0 entidades»— en medio de otras seis líneas de arranque
+        igual de tranquilas. Una capa vacía cuando hay conversación de sobra no
+        es un dato: es un síntoma, y merece el tono de un síntoma.
+        """
+        memorias = self.storage.vector.count()
+        logging.info(f"[Memory] Iniciada — {memorias} memorias vectoriales")
+        try:
+            entidades = len(self.storage.graph.get_entity_names())
+        except Exception as e:
+            logging.warning(f"[Memory] No pude contar el grafo: {e}")
+            return
+        if memorias and not entidades:
+            logging.warning(
+                "[Memory] El grafo está VACÍO habiendo %d memorias. La extracción "
+                "de entidades no está guardando nada — revisa los errores de "
+                "'[Memory] Error extracción grafo' tras los próximos 20 mensajes.",
+                memorias,
+            )
 
     def _purgar_caducadas(self) -> None:
         """
@@ -277,9 +312,8 @@ class MemoryManager:
                 conversation = conversation,
                 current_date = current_date,
             )
-            response = self.analysis_llm.invoke(prompt)
-            content  = re.sub(r'```(?:json)?\s*', '', response.content).strip()
-            payload  = json.loads(content)
+            response = self.extraction_llm.invoke(prompt)
+            payload  = json.loads(response.content)
             facts    = payload.get("facts", [])
 
             # Del mismo JSON sale lo que Iris sintió — sin llamada extra
@@ -315,9 +349,8 @@ class MemoryManager:
                 conversation = conversation,
                 current_date = current_date,
             )
-            response = self.analysis_llm.invoke(prompt)
-            content  = re.sub(r'```(?:json)?\s*', '', response.content).strip()
-            graph    = json.loads(content)
+            response = self.extraction_llm.invoke(prompt)
+            graph    = json.loads(response.content)
 
             for entity in graph.get("entities", []):
                 self.storage.graph.add_entity(
@@ -337,7 +370,10 @@ class MemoryManager:
             # Hay entidades nuevas: que el matcher las relea en la próxima consulta
             self._entity_matcher.invalidate()
 
-            logging.info("[Memory] Grafo actualizado.")
+            logging.info(
+                f"[Memory] Grafo actualizado — {len(graph.get('entities', []))} entidades, "
+                f"{len(graph.get('relations', []))} relaciones."
+            )
         except Exception as e:
             logging.error(f"[Memory] Error extracción grafo: {e}")
 

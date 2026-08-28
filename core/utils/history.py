@@ -1,3 +1,4 @@
+import logging
 import threading
 
 from langchain_core.messages import HumanMessage, AIMessage
@@ -33,6 +34,14 @@ class ConversationHistory:
             self._messages.extend(msgs)
 
     def append_turn(self, user_content: str, ai_content: str) -> None:
+        # Un turno a medias envenena todo lo que venga después: va en la ventana
+        # de contexto de cada mensaje siguiente, y un turno de la IA en blanco le
+        # enseña al modelo que responder nada es aceptable. Mejor perder el turno
+        # que arrastrarlo.
+        if not (user_content or "").strip() or not (ai_content or "").strip():
+            logging.warning("[Historial] Turno vacío descartado, no se guarda.")
+            return
+
         with self._lock:
             self._messages.extend([
                 HumanMessage(content=user_content),

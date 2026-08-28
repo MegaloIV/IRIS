@@ -221,6 +221,7 @@ def init_supabase_schema():
                 impulse REAL DEFAULT 0.0
             );
         """)
+
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_journal_unshared
             ON iris_journal (impulse DESC, at DESC)
@@ -336,23 +337,47 @@ _EMBED_MODEL = "all-MiniLM-L6-v2"
 _DUPLICADO_SOBRE = 0.97
 
 
+_ENCODER = None
+_ENCODER_LOCK = threading.Lock()
+
+
+def _get_encoder():
+    """
+    El modelo de embeddings, uno para todo el proceso.
+
+    Lo usan las memorias y el diario. Cargarlo dos veces son otros 90 MB de RAM
+    y otro arranque lento, y en la VM eso sí se nota.
+
+    Con el modelo ya cacheado, SentenceTransformer hace ~25 peticiones a
+    HuggingFace solo para comprobar si hay versión nueva. En un servidor eso es
+    latencia de arranque y una dependencia externa innecesaria, así que se
+    intenta primero en local y solo se sale a la red si no está.
+    """
+    global _ENCODER
+    if _ENCODER is not None:
+        return _ENCODER
+    with _ENCODER_LOCK:
+        if _ENCODER is None:
+            from sentence_transformers import SentenceTransformer
+            try:
+                _ENCODER = SentenceTransformer(_EMBED_MODEL, local_files_only=True)
+            except Exception:
+                logging.info(f"[Supabase] {_EMBED_MODEL} no está cacheado — descargando...")
+                _ENCODER = SentenceTransformer(_EMBED_MODEL)
+    return _ENCODER
+
+
+def _embed_text(text: str) -> list[float]:
+    return _get_encoder().encode(text).tolist()
+
+
 class SupabaseVectorStorage(BaseVectorStorage):
 
     def __init__(self):
-        from sentence_transformers import SentenceTransformer
-
-        # Con el modelo ya cacheado, SentenceTransformer hace ~25 peticiones a
-        # HuggingFace solo para comprobar si hay versión nueva. En un servidor
-        # eso es latencia de arranque y una dependencia externa innecesaria, así
-        # que se intenta primero en local y solo se sale a la red si no está.
-        try:
-            self.encoder = SentenceTransformer(_EMBED_MODEL, local_files_only=True)
-        except Exception:
-            logging.info(f"[Supabase] {_EMBED_MODEL} no está cacheado — descargando...")
-            self.encoder = SentenceTransformer(_EMBED_MODEL)
+        self.encoder = _get_encoder()
 
     def _embed(self, text: str) -> list[float]:
-        return self.encoder.encode(text).tolist()
+        return _embed_text(text)
 
     def add(self, memory_id: str, content: str, metadata: dict) -> None:
         embedding = self._embed(content)
@@ -501,6 +526,29 @@ class SupabaseJournalStorage(BaseJournalStorage):
             )
             return cur.fetchone()[0]
 
+    def pending(self, min_impulse: float = 0.0, limit: int = 2) -> list[dict]:
+        """
+        Lo que aún no ha contado y más ganas tiene de contar.
+
+        Ordenado por impulso, no por parecido con lo que se esté hablando: medido
+        con este encoder, "que tal el día" se parece MÁS a una entrada sobre su
+        novela (0.529) que "llevo semanas sin tocar la novela" (0.463). Está
+        entrenado en inglés y en español lo comprime todo entre 0.4 y 0.6, así
+        que no hay umbral que separe. Decidir si algo viene a cuento se lo queda
+        el modelo que ya está respondiendo, que entiende español de sobra.
+        """
+        with _cursor(dict_rows=True) as cur:
+            cur.execute(
+                f"""
+                SELECT {_JOURNAL_COLS} FROM iris_journal
+                WHERE shared = FALSE AND impulse >= %s
+                ORDER BY impulse DESC, at DESC
+                LIMIT %s
+                """,
+                (float(min_impulse), limit),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
     def recent(self, n: int) -> list[dict]:
         with _cursor(dict_rows=True) as cur:
             cur.execute(f"SELECT {_JOURNAL_COLS} FROM iris_journal ORDER BY at DESC LIMIT %s", (n,))
@@ -549,7 +597,14 @@ def _format_graph_rows(rows: list[dict]) -> str:
     for row in rows:
         chain        = row.get("relation_chain") or []
         relation_str = " → ".join(chain) if chain else row.get("relation", "?")
-        key          = f"{row['source']}-{relation_str}-{row['target']}"
+
+        # Un salto recorrido al revés se imprime en su sentido real. Con varios
+        # saltos ya es un camino y no una afirmación, así que se deja como está.
+        origen, destino = row["source"], row["target"]
+        if row.get("invertida") and row.get("hops", 1) == 1:
+            origen, destino = destino, origen
+
+        key = f"{origen}-{relation_str}-{destino}"
         if key in seen:
             continue
         seen.add(key)
@@ -566,7 +621,7 @@ def _format_graph_rows(rows: list[dict]) -> str:
         hops     = row.get("hops", 1)
         prefix   = "  └" if hops and hops > 1 else "-"
         meta_str = f" [{' | '.join(meta)}]" if meta else ""
-        lines.append(f"{prefix} {row['source']} {relation_str} {row['target']}{meta_str}")
+        lines.append(f"{prefix} {origen} {relation_str} {destino}{meta_str}")
 
     return "\n".join(lines)
 
@@ -575,11 +630,17 @@ def _format_graph_rows(rows: list[dict]) -> str:
 # {rel_filter} se sustituye por el filtro de tipos de relación, o por nada.
 _WALK_SQL = """
 WITH RECURSIVE edges AS (
-    SELECT from_name AS a, to_name AS b, relation, context, rel_date, history
+    -- Las aristas se recorren en los dos sentidos: para llegar a Lucía desde
+    -- Halcón hace falta poder ir en contra de la flecha. Pero `invertida` deja
+    -- constancia de cuál era la dirección real, o al renderizar saldría
+    -- "Halcón DESARROLLA Lucía", que es la frase al revés.
+    SELECT from_name AS a, to_name AS b, relation, context, rel_date, history,
+           FALSE AS invertida
     FROM iris_relations
     {rel_filter}
     UNION ALL
-    SELECT to_name AS a, from_name AS b, relation, context, rel_date, history
+    SELECT to_name AS a, from_name AS b, relation, context, rel_date, history,
+           TRUE AS invertida
     FROM iris_relations
     {rel_filter}
 ),
@@ -589,6 +650,7 @@ walk AS (
         ARRAY[e.relation] AS relation_chain,
         e.context, e.rel_date, e.history,
         1 AS hops,
+        e.invertida,
         ARRAY[e.a, e.b] AS visited
     FROM edges e
     WHERE e.a = %(seed)s
@@ -600,6 +662,7 @@ walk AS (
         w.relation_chain || e.relation,
         e.context, e.rel_date, e.history,
         w.hops + 1,
+        w.invertida,
         w.visited || e.b
     FROM walk w
     JOIN edges e ON e.a = w.target
@@ -610,6 +673,7 @@ SELECT
     w.source,
     w.relation_chain,
     w.target,
+    w.invertida,
     ent.type      AS target_type,
     w.context     AS rel_context,
     w.rel_date,

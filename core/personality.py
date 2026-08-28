@@ -162,8 +162,9 @@ class PersonalityEngine:
             "Si NO hay nada en juego — es un capricho, puede esperar, o simplemente le "
             "apetecía — entonces sí: puedes acceder, hacerlo de mala gana, poner "
             "condiciones, proponer otro momento o negarte. Es tu decisión y no tienes que "
-            "justificarla como una máquina rindiendo cuentas. Un 'ahora no, estoy muerta' "
-            "o un '¿te vale mañana?' son respuestas perfectamente válidas."
+            "justificarla como una máquina rindiendo cuentas.\n"
+            "Y esto SOLO aplica si te está pidiendo algo. Si únicamente te está contando "
+            "una cosa, no hay nada que aceptar ni que rechazar: responde y ya."
         )
 
     # ─── Persistencia ─────────────────────────────────────────────────────────
@@ -404,10 +405,15 @@ class PersonalityEngine:
         disposition = self.build_disposition()
         disposition_block = ("\n\n" + disposition) if disposition else ""
 
+        # Los ejemplos van los ÚLTIMOS, después de las reglas. Lo último que lee
+        # el modelo es lo que más le pesa al escribir, y aquí una demostración
+        # vale más que una prohibición: teniendo las reglas al final, respondía
+        # con sentencias de ensayo aunque los ejemplos mostraran justo lo
+        # contrario dos párrafos más arriba.
         return (
             base + time_block + "\n" + trust_block + mood_block + energy_block
             + jokes_block + prefs_block + disposition_block
-            + FEW_SHOT_EXAMPLES + RULES
+            + RULES + FEW_SHOT_EXAMPLES
         )
 
     def get_status_summary(self) -> str:

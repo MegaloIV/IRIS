@@ -241,6 +241,13 @@ class SQLiteJournalStorage(BaseJournalStorage):
         row = cursor.fetchone()
         return _journal_row(row) if row else None
 
+    def pending(self, min_impulse: float = 0.0, limit: int = 2) -> list[dict]:
+        cursor = self.conn.execute(
+            f"SELECT {self._COLS} FROM iris_journal WHERE shared = 0 AND impulse >= ? "
+            "ORDER BY impulse DESC, at DESC LIMIT ?", (float(min_impulse), limit)
+        )
+        return [_journal_row(r) for r in cursor.fetchall()]
+
     def mark_shared(self, entry_id: int) -> None:
         self.conn.execute("UPDATE iris_journal SET shared = 1 WHERE id = ?", (entry_id,))
         self.conn.commit()

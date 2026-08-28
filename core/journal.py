@@ -14,6 +14,7 @@ mucho tiempo dejó el motor proactivo en «¿le escribo?».
 import logging
 import os
 import random
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -48,6 +49,23 @@ _PESOS = {
 # Solo lectura. Es curiosidad, no una tarea: no tiene por qué poder escribir
 # nada, y menos sin nadie delante.
 _HERRAMIENTAS_CURIOSEO = "Read,Glob,Grep"
+
+# Mencionarlo en una conversación que ya existe es mucho más barato que
+# interrumpirle un martes por la tarde, así que el listón baja.
+_REBAJA_EN_CONVERSACION = 0.5
+# Cuántas se le ponen delante a la vez. Con más, el prompt empieza a parecer una
+# lista de temas pendientes y se nota que va leyendo un guion.
+_A_LA_MANO = 2
+# Palabras con contenido que tiene que reutilizar para dar por hecho que la sacó.
+# Con una sola, cualquier coincidencia casual la daría por contada.
+#
+# Es una detección floja a propósito y se sabe: el prompt le pide que lo cuente
+# con sus palabras, así que una paráfrasis buena puede no compartir casi ninguna.
+# Por eso existe también _OPORTUNIDADES — si de verdad la usó, bien; y si no, el
+# contador la retira igual.
+_PALABRAS_PARA_DARLO_POR_DICHO = 3
+# Turnos que una entrada puede estar disponible antes de darla por pasada.
+_OPORTUNIDADES = 3
 
 _NADA = "[NADA]"
 
@@ -245,6 +263,90 @@ class JournalKeeper:
         return {k[5:].lower(): v for k, v in os.environ.items()
                 if k.startswith("PATH_") and v}
 
+    # ─── Sacarlo en la conversación ───────────────────────────────────────────
+
+    def algo_que_contar(self, mensaje: str) -> str:
+        """
+        Lo que pensó ella y todavía no ha contado, por si viene a cuento.
+
+        Hasta ahora el diario tenía un único consumidor —el motor proactivo— y
+        solo disparaba tras horas de silencio. O sea que si ya estabais hablando,
+        lo que hubiera pensado se quedaba dentro: por eso nunca sacaba un tema
+        propio, no tenía de dónde.
+
+        Aquí NO se decide si encaja: se le enseña y decide ella al responder. La
+        alternativa era filtrar por parecido, y medido con este encoder "qué tal
+        el día" se parece más a una entrada sobre su novela que "llevo semanas
+        sin tocar la novela" — no hay umbral que funcione. El modelo que ya está
+        respondiendo entiende español; el encoder no lo suficiente.
+        """
+        if not settings.journal.enabled:
+            return ""
+
+        # Más bajo que el de escribirte por iniciativa propia, y con razón:
+        # interrumpirte cuando no estás es caro, mencionarlo mientras ya habláis
+        # no cuesta nada.
+        umbral = settings.journal.impulse_threshold * _REBAJA_EN_CONVERSACION
+        try:
+            pendientes = self.iris.storage.journal.pending(umbral, limit=_A_LA_MANO)
+        except Exception as e:
+            logger.debug(f"[Diario] No pude mirar si tenía algo que contar: {e}")
+            return ""
+        if not pendientes:
+            return ""
+
+        # Cuántas veces se le ha puesto delante cada una. Sin esto, una entrada
+        # que nunca encaja se ofrece en cada turno para siempre y ocupa el sitio
+        # de las que vienen detrás.
+        self._veces = getattr(self, "_veces", {})
+        for e in pendientes:
+            self._veces[e["id"]] = self._veces.get(e["id"], 0) + 1
+            if self._veces[e["id"]] > _OPORTUNIDADES:
+                logger.info(f"[Diario] Se le pasó el momento: {e['content'][:60]}")
+                self._marcar(e["id"])
+
+        self._ofrecidas = {e["id"]: e["content"] for e in pendientes}
+        listado = "\n".join(
+            f'  - ({_hace(e.get("at"))}) "{e["content"]}"' for e in pendientes
+        )
+        # El orden de estas dos frases importa, y ya se aprendió por las malas con
+        # la cláusula de urgencia de la disposición: lo que va primero pesa. Con
+        # la advertencia delante, no lo sacaba nunca ni cuando encajaba de lleno.
+        return (
+            "[COSAS TUYAS QUE TODAVÍA NO LE HAS CONTADO]\n"
+            f"{listado}\n"
+            "PRIMERO mira si alguna tiene que ver con lo que te acaba de decir. Si la "
+            "hay, DILA — es tuya, la pensaste tú, y es de las pocas veces que puedes "
+            "aportar algo que no te han preguntado. Suéltala como quien retoma algo que "
+            "llevaba en la cabeza: sin anunciar que lo habías pensado antes, sin "
+            "explicar de dónde sale. Si te cuenta que lleva desde las ocho y tú pensaste "
+            "que se regala el tiempo, ese es el momento exacto.\n"
+            "Si de verdad ninguna encaja, no digas nada de esto y ya está."
+        )
+
+    def registrar_si_lo_conto(self, respuesta: str) -> None:
+        """
+        Marca como contado lo que de verdad haya usado.
+
+        Se comprueba después, sobre lo que dijo, y no antes: dar por contado algo
+        solo por habérselo enseñado gastaría el diario entero en dos turnos sin
+        que él llegara a leer nada.
+        """
+        if not getattr(self, "_ofrecidas", None):
+            return
+        dichas = _palabras(respuesta)
+        for entry_id, contenido in self._ofrecidas.items():
+            if len(dichas & _palabras(contenido)) >= _PALABRAS_PARA_DARLO_POR_DICHO:
+                logger.info(f"[Diario] Lo sacó en la conversación: {contenido[:70]}")
+                self._marcar(entry_id)
+        self._ofrecidas = {}
+
+    def _marcar(self, entry_id: int) -> None:
+        try:
+            self.iris.storage.journal.mark_shared(entry_id)
+        except Exception as e:
+            logger.warning(f"[Diario] No pude marcar la entrada {entry_id}: {e}")
+
     # ─── Lectura: /diario ─────────────────────────────────────────────────────
 
     def summary(self, n: int = 8) -> str:
@@ -268,6 +370,37 @@ class JournalKeeper:
         lineas.append("")
         lineas.append("· = ya te lo contó. El resto se lo guarda.")
         return "\n".join(lineas)
+
+
+_VACIAS = {
+    "para","porque","cuando","donde","como","pero","aunque","entonces","tambien",
+    "todos","todas","desde","hasta","sobre","entre","entonces","siempre","nunca",
+    "entre","antes","despues","entrar","estar","tener","hacer","decir","mucho",
+    "poco","algo","nada","este","esta","estos","estas","aquel","otro","otra",
+    "ahora","luego","bueno","bien","cosa","cosas","vez","veces",
+}
+
+
+def _palabras(texto: str) -> set:
+    """Palabras con contenido, normalizadas sin tildes, para comparar dos textos."""
+    import unicodedata
+    plano = unicodedata.normalize("NFD", (texto or "").lower())
+    plano = "".join(c for c in plano if unicodedata.category(c) != "Mn")
+    return {p for p in re.findall(r"[a-z]{5,}", plano) if p not in _VACIAS}
+
+
+def _hace(valor) -> str:
+    """Cuándo lo pensó, en vago. Una fecha exacta la delataría como una fila."""
+    try:
+        dt = valor if isinstance(valor, datetime) else datetime.fromisoformat(str(valor))
+        horas = (datetime.now() - dt.replace(tzinfo=None)).total_seconds() / 3600
+    except Exception:
+        return "el otro día"
+    if horas < 6:   return "hace un rato"
+    if horas < 24:  return "esta mañana" if dt.hour < 14 else "hoy antes"
+    if horas < 48:  return "ayer"
+    if horas < 168: return "hace unos días"
+    return "hace tiempo"
 
 
 def _fecha_corta(valor) -> str:
