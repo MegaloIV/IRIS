@@ -49,7 +49,7 @@ def setup_telegram(iris):
         from scripts.start_telegram import start_cloudflared, set_webhook
         cf_proc, public_url = start_cloudflared(settings.server.port)
         print(f"[cloudflared] URL pública: {public_url}")
-        set_webhook(settings.telegram.bot_token, public_url)
+        set_webhook(settings.telegram.bot_token, public_url, settings.telegram.webhook_secret)
         threading.Thread(target=_run_telegram_server, args=(iris,), daemon=True).start()
         print("[Telegram] Bot activo — envía un mensaje al bot para empezar.")
         return cf_proc, True
@@ -118,6 +118,35 @@ def setup_agent_link():
         return None
 
 
+def _register_server_webhook() -> None:
+    """
+    Apunta el webhook de Telegram a este servidor.
+
+    En modo local lo hacía `setup_telegram()` tras levantar el túnel, porque la
+    URL de cloudflared cambiaba en cada arranque. En servidor el dominio es fijo
+    y nadie registraba nada: la app quedaba montada en /tg escuchando updates
+    que Telegram seguía mandando a la última URL efímera que conociera. Es decir,
+    el bot dejaba de responder al desplegar, sin ningún error que lo dijera.
+    """
+    from scripts.start_telegram import register_webhook
+
+    public_url = settings.server.public_url
+    if not public_url:
+        print(
+            "[Telegram] No hay IRIS_DOMAIN ni IRIS_PUBLIC_URL — el webhook no se "
+            "registra y el bot no recibirá nada. Defínelos en el .env del servidor."
+        )
+        return
+
+    register_webhook(
+        settings.telegram.bot_token,
+        public_url,
+        path="/tg/webhook",
+        secret=settings.telegram.webhook_secret,
+        wait=3,
+    )
+
+
 def run_api_server(iris):
     """Modo servidor: levanta FastAPI con /chat, /stream y /agent. Bloquea."""
     import uvicorn
@@ -130,6 +159,13 @@ def run_api_server(iris):
             from interfaces.telegram_bot import create_telegram_app
             app.mount("/tg", create_telegram_app(iris))
             print("[Telegram] Webhook montado en /tg/webhook")
+            # En un hilo y con margen: uvicorn todavía no escucha, y registrar
+            # antes haría que el primer update de Telegram se topara con la
+            # puerta cerrada. Reintenta solo, pero el síntoma —"no contesta al
+            # primer mensaje"— es de los que hacen perder una tarde.
+            threading.Thread(
+                target=_register_server_webhook, daemon=True, name="iris-tg-webhook",
+            ).start()
         except Exception as e:
             print(f"[Telegram] No se pudo montar: {e}")
 

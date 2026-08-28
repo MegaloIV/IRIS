@@ -39,6 +39,17 @@ class BaseVectorStorage(ABC):
     @abstractmethod
     def count(self) -> int: ...
 
+    @abstractmethod
+    def purge_expired(self) -> int:
+        """
+        Borra las memorias caducadas y devuelve cuántas.
+
+        `expires_at` lo pone quien guarda: los registros de tareas nacen con
+        siete días porque «te creé este archivo» importa esta semana y no en
+        marzo. Las memorias de verdad no caducan — llegan con expires_at nulo.
+        """
+        ...
+
 
 class BasePreferenceStorage(ABC):
     """

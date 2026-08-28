@@ -201,7 +201,7 @@
       <span><b>Repo</b> IRIS · feature/iris-core</span>
       <span><b>Base</b> a31dcf2</span>
       <span><b>Fases</b> 8</span>
-      <span><b>Estado</b> fase 05 siguiente</span>
+      <span><b>Estado</b> solo queda desplegar</span>
       <span><b>Rev 3</b> · ago 2026</span>
     </div>
   </div>
@@ -646,6 +646,9 @@ strength += 0.15*(1-strength)</code></pre>
           <h3>Desplegar en Google Cloud <span class="tag t-rec">crédito de prueba</span></h3>
           <p class="why">Con dominio propio desaparece el baile de <code>start_cloudflared</code>, que hoy consigue una URL efímera distinta en cada arranque.</p>
           <ul>
+            <li class="done">Webhook de Telegram registrado contra el dominio fijo — antes solo se registraba en modo local, con la URL efímera de cloudflared</li>
+            <li class="done"><code>secret_token</code> en el webhook: sin él la única defensa era el <code>owner_id</code> que viene <em>dentro</em> del POST</li>
+            <li class="done"><code>.env.example</code> y <code>docs/deploy.md</code> — plantilla y runbook</li>
             <li><code>e2-small</code> (2 GB) o <code>e2-medium</code> (4 GB) — con 4 GB no hay dudas sobre torch</li>
             <li>Base de datos en Supabase, fuera de la VM</li>
             <li>STT: el cliente transmite audio por el WS; el servidor llama a Whisper de Groq</li>
@@ -656,16 +659,17 @@ strength += 0.15*(1-strength)</code></pre>
       </div>
 
       <div class="phase">
-        <div class="num">06<small>~1 semana</small></div>
+        <div class="num">06<small>cerrada</small></div>
         <div class="body">
           <h3>Diario y vida autónoma <span class="tag t-rec">0 €</span></h3>
           <p class="why">La pieza que da la sensación de Amadeus. Va después del despliegue porque las actividades reales necesitan el canal al portátil.</p>
           <ul>
-            <li>Tipos de actividad y <code>ACTIVITY_PROMPTS</code>; el tick escribe al diario</li>
-            <li><code>/diario</code> — <strong>déjalo acumular sin dejarle escribir todavía</strong></li>
-            <li>Abre la iniciativa: umbral de <code>impulse</code> alto (0.75) y bájalo hasta el punto donde te alegra que escriba en vez de molestarte</li>
-            <li>Jitter en el intervalo; energía consumida por actividad</li>
-            <li>Actividades reales sobre el canal del portátil, con permisos acotados</li>
+            <li class="done">Cuatro tipos y <code>ACTIVITY_PROMPTS</code>; el tick escribe al diario — <code>core/journal.py</code></li>
+            <li class="done"><code>/diario</code>, y <code>JOURNAL_SHARE_ENABLED=false</code> por defecto: acumula sin dejarle escribir</li>
+            <li class="done">Umbral en <code>JOURNAL_IMPULSE_THRESHOLD</code>, arrancando en 0.75 para bajarlo a mano</li>
+            <li class="done">Jitter de 20–40 min; <code>spend_energy()</code> por cada rato de pensar</li>
+            <li class="done">Actividades reales con <code>--allowedTools Read,Glob,Grep</code> y tope diario</li>
+            <li>Calibrar con <code>/diario</code>: bajar el umbral hasta donde te alegre que escriba</li>
           </ul>
         </div>
       </div>
@@ -717,7 +721,9 @@ strength += 0.15*(1-strength)</code></pre>
     <div class="prose" style="margin-top:1.75rem">
       <details class="note">
         <summary>Si algún día haces la fase 07: qué costaría</summary>
-        <p>Con ~5.000 tokens de entrada por turno y ~600 de salida, un turno delegado sale a <strong>2–6 céntimos</strong> con <code>claude-opus-5</code>, según <code>effort</code>. La palanca principal no es el caché, es <code>effort</code>: Opus 5 piensa por defecto y esos tokens se facturan como salida. Enrutando solo visión y herramientas — unos 300 turnos al mes — salen <strong>~18 $/mes</strong> con Opus 5 y <strong>~11 $</strong> con Sonnet 5.</p>
+        <p class="warn"><strong>Medido, ya no estimado.</strong> Con <code>total_cost_usd</code> funcionando (fase 01), seis delegaciones reales —leer un archivo, mirar una imagen, dos turnos encadenados— dan una media de <strong>0,21 $ por turno</strong>. La estimación original de este documento eran 2–6 céntimos: se quedó corta por un factor de <strong>4 a 10</strong>.</p>
+        <p>La diferencia no es el caché ni los tokens de entrada, que se calcularon bien. Es que <code>effort</code> pesa más de lo que parecía —Opus 5 piensa por defecto y ese razonamiento se factura como salida— y que la personalidad de Iris entera viaja ahora en <code>--append-system-prompt</code> en cada llamada. Así que la cuenta real, con los mismos ~300 turnos al mes: <strong>~63 $/mes</strong> con Opus 5 en vez de los 18 $ que decía aquí.</p>
+        <p>Eso cambia el sentido de la fase 07 más que ninguna otra cosa del plan. Con 18 $/mes, quitar la dependencia del portátil era casi un capricho asequible; con 63 $, es una decisión de verdad — y la alternativa obvia pasa a ser Sonnet 5, o enrutar a la API solo la visión y dejar las herramientas donde están. Por eso <code>/coste</code> importa: no para vigilar un gasto que hoy es cero, sino para que esta cifra la dé una medición y no una estimación a ojo.</p>
         <p>Y ojo con el control de escritorio: <code>companion/screen.py:25</code> manda la captura a resolución nativa, y una imagen a máxima resolución son hasta ~4.800 tokens. Bajarla a 1080p recorta bastante sin perder precisión.</p>
       </details>
     </div>
@@ -759,6 +765,24 @@ strength += 0.15*(1-strength)</code></pre>
         <p>El grafo llevaba meses sin existir. Los dos modelos de Groq devolvían 404. La instancia de Aura estaba borrada. Y el propio <code>basicConfig</code> era un no-op porque otra librería configuraba logging antes — el arreglo del silencio, en silencio.</p>
         <p>Ninguno dio la cara, porque cada capa captura su excepción y devuelve un valor vacío: <code>{}</code>, <code>""</code>, una lista sin elementos. Es un patrón razonable tomado uno a uno — que un fallo del grafo no tumbe la conversación — y desastroso en conjunto: el sistema se degrada hasta quedarse hueco y sigue pareciendo que funciona.</p>
         <p>La lección para lo que queda: <strong>capturar la excepción y seguir está bien; hacerlo sin dejar rastro, no</strong>. Con el logging arreglado, la próxima vez que algo se caiga lo vas a ver el mismo día.</p>
+      </div>
+
+      <div class="thesis warn prose" style="margin:1.5rem 0">
+        <div class="eyebrow">Encontrado preparando el despliegue</div>
+        <p class="big">El webhook de Telegram no tenía quién lo defendiera.</p>
+        <p>La única comprobación era <code>user_id != owner_id</code>, y ese <code>user_id</code> viaja <strong>dentro del cuerpo del POST</strong> — o sea, lo pone quien llama. Detrás de un túnel efímero de cloudflared que cambiaba en cada arranque, casi daba igual. Con un dominio fijo y público, cualquiera que diera con la URL podía fabricar un update diciendo ser tú, y Iris le habría hecho caso: leerle archivos, mirar la pantalla, abrir programas.</p>
+        <p>Arreglado con el <code>secret_token</code> de la propia API de Telegram, que vuelve en la cabecera <code>X-Telegram-Bot-Api-Secret-Token</code> de cada update. Si no se define, se deriva del token del bot — quien tenga ese token ya controla el bot entero, así que no debilita nada y evita una variable más que rellenar.</p>
+        <p>Es el patrón de la fase 00 otra vez, con una vuelta de tuerca: <strong>no estaba roto, iba a romperse al desplegar</strong>. Lo que lo protegía no era el código, era que la URL no duraba lo suficiente como para que valiera la pena buscarla.</p>
+      </div>
+
+      <p><strong>Fase 06 cerrada: ya le pasan cosas cuando no estás.</strong> Cada 20–40 minutos —con jitter, porque media hora exacta se nota y parece un cron— Iris se despierta y hace algo suyo: desarrolla una postura sobre algo reciente, cruza dos recuerdos que nunca habían estado juntos, formula una pregunta que le da curiosidad de verdad, o se va a curiosear un archivo tuyo con permisos de solo lectura. Lo anota en <code>iris_journal</code> y sigue a lo suyo. Escribirte es una de las respuestas posibles, no la pregunta.</p>
+
+      <div class="thesis prose" style="margin:1.5rem 0">
+        <div class="eyebrow">La decisión de diseño que sostiene la fase</div>
+        <p class="big">Qué piensa y si te lo cuenta son dos preguntas distintas.</p>
+        <p><code>core/journal.py</code> tiene la primera; <code>core/proactive.py</code>, la segunda. Tenerlas juntas es exactamente lo que dejó el motor proactivo atascado tanto tiempo en «¿le escribo?»: si la única pregunta del tick es si mandar un mensaje, entonces fuera de esa decisión no le pasa nada a Iris cuando no estás, y al volver no hay nadie — hay una función esperando argumentos.</p>
+        <p>Las conexiones nacen con impulso 0.8 y las reflexiones con 0.35, y esa diferencia es toda la tesis: «hace rato que no hablamos» lo puede decir cualquier temporizador; «creo que lo del martes es lo mismo que te pasaba en noviembre» solo lo puede decir alguien a quien le ocurrió algo mientras no mirabas. No es más lista — <strong>tiene procedencia</strong>.</p>
+        <p>Y pensar cuesta energía. Sin ese coste rumiaría sin parar; con él el ciclo se autorregula solo —piensa, se cansa, descansa, vuelve— y esa curva acaba notándose en su tono. Es la misma razón por la que el arreglo del regen tenía que ir antes: con la energía congelada en el arranque, este ciclo no habría funcionado nunca.</p>
       </div>
 
       <p><strong>Fase 01 cerrada: la CLI, exprimida.</strong> Claude se invoca con <code>--output-format json</code>, así que el fallo lo declara <code>is_error</code> en vez de deducirse de si el texto empieza por un corchete. La personalidad viaja en <code>--append-system-prompt</code> y con eso <strong>desaparece la tercera llamada al LLM</strong>: Claude responde siendo Iris, en vez de que Groq narre después lo que otro modelo hizo. Las acciones de escritorio salen conformes a <code>--json-schema</code> — un <code>json.loads</code> limpio donde antes había que arrancarle las comillas de markdown. Y las imágenes viajan por ruta: Claude las abre con <code>Read</code>, que es su trabajo, en vez de recibir megas de base64 incrustados en la línea de comandos.</p>

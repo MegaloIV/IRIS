@@ -15,8 +15,9 @@ from pathlib import Path
 from config.settings import settings
 from core.personality import PersonalityEngine
 from core.preferences import PreferenceEngine
+from core.journal import JournalKeeper
 from core.memory import MemoryManager
-from core.llm_factory import get_llm, get_analysis_llm
+from core.llm_factory import get_llm, get_analysis_llm, get_fast_llm
 from storage.factory import StorageFactory
 from core.utils.history import ConversationHistory
 from core.utils.context import build_messages
@@ -60,12 +61,19 @@ class IrisAgent:
         self.storage      = StorageFactory()
         self.llm          = get_llm()
         self.analysis_llm = get_analysis_llm()
+        # Mismo modelo rápido que el de análisis, pero sin forzar JSON: lo usa
+        # la vida interior, que escribe en prosa.
+        self.fast_llm     = get_fast_llm()
 
         self.personality  = PersonalityEngine(state_storage=self.storage.state)
         self.personality.set_analysis_llm(self.analysis_llm)
 
         self.preferences = PreferenceEngine(self.storage.preferences)
         self.personality.set_preferences(self.preferences)
+
+        # Lo que piensa cuando no hay nadie delante. El motor autónomo
+        # (core/proactive.py) es quien lo pone en marcha.
+        self.journal = JournalKeeper(self)
 
         self.memory = MemoryManager(
             analysis_llm = self.analysis_llm,
@@ -619,6 +627,9 @@ class IrisAgent:
         try:
             snippet    = user_input[:80].strip()
             task_type  = intent.get("task_type", "other")
+            # Caduca a los siete días: "te creé este archivo" importa esta
+            # semana, no en marzo. Sin la caducidad, cada tarea dejaba una fila
+            # permanente en la memoria semántica.
             expires_at = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
             self.storage.vector.add(
                 memory_id = str(uuid.uuid4()),

@@ -156,7 +156,25 @@ class MemoryManager:
 
         self._entity_matcher = _EntityMatcher(self.storage.graph)
 
+        self._purgar_caducadas()
         logging.info(f"[Memory] Iniciada — {self.storage.vector.count()} memorias vectoriales")
+
+    def _purgar_caducadas(self) -> None:
+        """
+        Tira lo que ya no debería recordar.
+
+        Al arrancar y no en cada turno: son unos pocos borrados al día y no
+        merece un viaje de red por mensaje. Lo que sí importa es que ocurra —
+        `expires_at` llevaba escribiéndose desde siempre sin que nadie lo mirara,
+        y esas filas competían con los recuerdos reales por los cinco huecos de
+        contexto de cada conversación.
+        """
+        try:
+            n = self.storage.vector.purge_expired()
+            if n:
+                logging.info(f"[Memory] {n} memorias caducadas olvidadas.")
+        except Exception as e:
+            logging.warning(f"[Memory] No pude purgar caducadas: {e}")
 
     # ─── Sesión activa ────────────────────────────────────────────────────────
 

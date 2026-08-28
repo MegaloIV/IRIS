@@ -557,6 +557,7 @@ class ClaudeDelegator:
         system_prompt: str = "",
         resume_session: str = "",
         json_schema: dict | None = None,
+        allowed_tools: str = "",
     ) -> ClaudeResult:
         """
         Llama a Claude Code y devuelve el resultado ya interpretado.
@@ -568,6 +569,9 @@ class ClaudeDelegator:
                           contexto que Claude ya tiene.
         json_schema     — obliga a que la salida cumpla el esquema. Sustituye a
                           arrancarle las comillas de markdown a mano.
+        allowed_tools   — acota los permisos por debajo del ajuste global. Lo usa
+                          la vida interior: curiosear sin nadie delante no
+                          necesita poder escribir en el disco.
         """
         if file_path:
             try:
@@ -586,7 +590,7 @@ class ClaudeDelegator:
             "wsl",
             settings.claude.bin_path,
             "--output-format", "json",
-            "--allowedTools", settings.claude.allowed_tools,
+            "--allowedTools", allowed_tools or settings.claude.allowed_tools,
         ]
         if system_prompt:
             cmd += ["--append-system-prompt", system_prompt]

@@ -1,6 +1,8 @@
 # Secrets
 .env
 .env.*
+# La plantilla sí: es lo que hace reproducible el despliegue
+!.env.example
 !.env.example
 
 # Python

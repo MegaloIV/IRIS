@@ -117,6 +117,30 @@ def get_llm():
             raise ValueError(f"Provider '{provider}' no soportado.")
 
 
+def get_fast_llm(temperature: float = 0.8):
+    """
+    El modelo rápido, pero escribiendo prosa.
+
+    Es el mismo de get_analysis_llm() sin `response_format: json_object`. Esa
+    opción no es un detalle: obliga a que la palabra "json" aparezca en el
+    prompt, así que pedirle a ese cliente un texto normal devuelve un 400 —
+    exactamente lo que le pasaba al diario.
+
+    Y la temperatura no es 0.0 a propósito. El análisis quiere ser determinista;
+    una reflexión escrita a temperatura cero sale plana, y una entrada de diario
+    plana no vale para lo que el diario existe.
+    """
+    keys = settings.llm.api_keys
+    if not keys:
+        raise ValueError("No hay API keys de Groq configuradas. Define GROQ_API_KEYS en .env")
+
+    model = settings.llm.analysis_model
+    if len(keys) == 1:
+        from langchain_groq import ChatGroq
+        return ChatGroq(model=model, temperature=temperature, api_key=keys[0])
+    return _RotatingGroqLLM(keys=keys, model=model, temperature=temperature)
+
+
 def get_analysis_llm():
     """Modelo rápido para análisis, clasificación y extracción (forzado a JSON)."""
     keys = settings.llm.api_keys

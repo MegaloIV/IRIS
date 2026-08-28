@@ -265,11 +265,19 @@ class ChromaVectorStorage(BaseVectorStorage):
         logging.info(f"[Storage] ChromaDB listo — {self.collection.count()} memorias.")
 
     def add(self, memory_id: str, content: str, metadata: dict) -> None:
+        # Chroma no acepta None en el metadata, y una cadena vacía se distingue
+        # igual de bien de una fecha al filtrar.
+        meta = {k: ("" if v is None else v) for k, v in metadata.items()}
         self.collection.add(
             ids       = [memory_id],
             documents = [content],
-            metadatas = [metadata],
+            metadatas = [meta],
         )
+
+    @staticmethod
+    def _caducada(meta: dict) -> bool:
+        fecha = (meta or {}).get("expires_at") or ""
+        return bool(fecha) and fecha < datetime.now().strftime("%Y-%m-%d")
 
     def query(self, text: str, n_results: int) -> list[dict]:
         if self.collection.count() == 0:
@@ -280,7 +288,11 @@ class ChromaVectorStorage(BaseVectorStorage):
         )
         documents = results.get("documents", [[]])[0]
         metadatas = results.get("metadatas", [[]])[0]
-        return [{"content": doc, **meta} for doc, meta in zip(documents, metadatas)]
+        return [
+            {"content": doc, **meta}
+            for doc, meta in zip(documents, metadatas)
+            if not self._caducada(meta)
+        ]
 
     def get_all(self) -> list[dict]:
         if self.collection.count() == 0:
@@ -289,7 +301,20 @@ class ChromaVectorStorage(BaseVectorStorage):
         return [
             {"content": doc, **meta}
             for doc, meta in zip(results["documents"], results["metadatas"])
+            if not self._caducada(meta)
         ]
+
+    def purge_expired(self) -> int:
+        if self.collection.count() == 0:
+            return 0
+        datos    = self.collection.get(include=["metadatas"])
+        caducados = [
+            i for i, meta in zip(datos["ids"], datos["metadatas"])
+            if self._caducada(meta)
+        ]
+        if caducados:
+            self.collection.delete(ids=caducados)
+        return len(caducados)
 
     def count(self) -> int:
         return self.collection.count()

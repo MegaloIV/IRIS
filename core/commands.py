@@ -7,7 +7,7 @@ Telegram. Lo único que cambia por canal es si se permite apagar el proceso.
 """
 
 COMMANDS = frozenset({
-    "/status", "/memoria", "/gustos", "/coste",
+    "/status", "/memoria", "/gustos", "/coste", "/diario",
     "/guardar", "/reset", "/trust", "/energy", "/salir",
 })
 
@@ -67,6 +67,12 @@ def handle_command(cmd: str, iris, allow_shutdown: bool = True) -> str:
             # cómo responde Iris (personality.build_system_prompt); esto sirve
             # para calibrar el umbral y ver qué se está asentando.
             out.append(iris.preferences.summary())
+
+        case "/diario":
+            # Lo que ha pensado sin ti delante. Vale la pena leerlo un tiempo
+            # antes de poner JOURNAL_SHARE_ENABLED=true: primero ves qué se está
+            # formando, y luego decides si quieres que te interrumpa con ello.
+            out.append(iris.journal.summary())
 
         case "/coste":
             # Lo que costaría la delegación si se pagara por token. Hoy va contra

@@ -152,9 +152,32 @@ def init_supabase_schema():
                 importance   INT DEFAULT 1,
                 temporal_ref TEXT,
                 stored_at    TIMESTAMPTZ DEFAULT NOW(),
-                owner        TEXT
+                owner        TEXT,
+                expires_at   DATE
             );
         """)
+
+        # Para bases que ya existían: la columna es nueva, la escritura no.
+        # `delegate_to_claude` lleva calculando expires_at desde siempre y este
+        # storage lo tiraba a la basura sin decir nada, así que los registros de
+        # tareas se acumulaban para siempre compitiendo con los recuerdos de
+        # verdad por los cinco huecos de contexto de cada turno.
+        cur.execute("ALTER TABLE iris_memories ADD COLUMN IF NOT EXISTS expires_at DATE;")
+
+        # Y las que ya estaban guardadas nacieron sin fecha, o sea eternas. Se
+        # les pone la que les habría tocado, contando desde el día en que se
+        # guardaron: las viejas quedan caducadas y se van en la siguiente purga,
+        # las de esta semana aguantan lo que les quede.
+        #
+        # Solo toca filas de tareas sin fecha, así que la segunda vez no hace
+        # nada — las nuevas ya nacen con la suya.
+        cur.execute("""
+            UPDATE iris_memories
+               SET expires_at = (stored_at + INTERVAL '7 days')::date
+             WHERE category = 'task' AND expires_at IS NULL
+        """)
+        if cur.rowcount:
+            logging.info(f"[Supabase] {cur.rowcount} registros de tareas antiguos: caducidad asignada.")
 
         # Índice de similitud: HNSW, no ivfflat.
         #
@@ -295,6 +318,23 @@ class SupabaseStateStorage(BaseStateStorage):
 
 _EMBED_MODEL = "all-MiniLM-L6-v2"
 
+# Por encima de esto, dos memorias son la misma. El umbral es alto a propósito, y
+# no por prudencia genérica — medido con este mismo encoder:
+#
+#   frase idéntica repetida .............. 1.000
+#   "le gusta el azul" / "...el verde" ... 0.934   ← hechos DISTINTOS
+#   "abre Crunchyroll" / "abre Discord" .. 0.845   ← hechos DISTINTOS
+#   "a Matt le gusta X" / "a Matías le gusta mucho X" ... 0.782  ← el MISMO
+#   el mismo hecho reformulado ........... 0.750
+#
+# Es decir: dos valores contradictorios del mismo atributo se parecen MÁS que una
+# paráfrasis real. Así que no existe ningún umbral que pille las paráfrasis sin
+# fusionar «azul» con «verde», y perder un hecho de verdad es mucho peor que
+# guardar un duplicado. Esto solo caza repeticiones casi literales — que es
+# justo lo que se estaba colando, porque ON CONFLICT (id) nunca casaba: el id
+# es un uuid nuevo en cada inserción.
+_DUPLICADO_SOBRE = 0.97
+
 
 class SupabaseVectorStorage(BaseVectorStorage):
 
@@ -317,11 +357,27 @@ class SupabaseVectorStorage(BaseVectorStorage):
     def add(self, memory_id: str, content: str, metadata: dict) -> None:
         embedding = self._embed(content)
         with _cursor(commit=True) as cur:
+            # ON CONFLICT (id) no servía de nada: el id es un uuid nuevo cada vez,
+            # así que "Créame una carpeta llamada Gerson es gil" acabó guardada
+            # dos veces idénticas. Lo que hay que comparar es el significado, y
+            # el vector ya está calculado — comprobarlo sale casi gratis.
+            cur.execute(
+                """
+                SELECT content FROM iris_memories
+                WHERE 1 - (embedding <=> %s::vector) > %s
+                LIMIT 1
+                """,
+                (embedding, _DUPLICADO_SOBRE),
+            )
+            if (ya := cur.fetchone()) is not None:
+                logging.debug(f"[Memoria] Ya lo sabía, no lo duplico: {ya[0][:60]}")
+                return
+
             cur.execute(
                 """
                 INSERT INTO iris_memories
-                    (id, content, embedding, category, importance, temporal_ref, owner)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (id, content, embedding, category, importance, temporal_ref, owner, expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO NOTHING
                 """,
                 (
@@ -332,6 +388,7 @@ class SupabaseVectorStorage(BaseVectorStorage):
                     metadata.get("importance", 1),
                     metadata.get("temporal_ref", ""),
                     metadata.get("owner", ""),
+                    metadata.get("expires_at") or None,
                 ),
             )
 
@@ -343,6 +400,7 @@ class SupabaseVectorStorage(BaseVectorStorage):
                 SELECT id, content, category, importance, temporal_ref, stored_at,
                        1 - (embedding <=> %s::vector) AS similarity
                 FROM iris_memories
+                WHERE expires_at IS NULL OR expires_at >= CURRENT_DATE
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s
                 """,
@@ -350,11 +408,23 @@ class SupabaseVectorStorage(BaseVectorStorage):
             )
             return [dict(r) for r in cur.fetchall()]
 
+    def purge_expired(self) -> int:
+        """Borra de verdad lo que ya caducó. Filtrar al leer no basta: si no se
+        borra, la tabla crece sin techo y el índice vectorial con ella."""
+        with _cursor(commit=True) as cur:
+            cur.execute(
+                "DELETE FROM iris_memories "
+                "WHERE expires_at IS NOT NULL AND expires_at < CURRENT_DATE"
+            )
+            return cur.rowcount or 0
+
     def get_all(self) -> list[dict]:
         with _cursor(dict_rows=True) as cur:
             cur.execute(
-                "SELECT id, content, category, importance, temporal_ref, stored_at "
-                "FROM iris_memories ORDER BY importance DESC"
+                "SELECT id, content, category, importance, temporal_ref, stored_at, expires_at "
+                "FROM iris_memories "
+                "WHERE expires_at IS NULL OR expires_at >= CURRENT_DATE "
+                "ORDER BY importance DESC"
             )
             return [dict(r) for r in cur.fetchall()]
 

@@ -24,6 +24,7 @@ from core.commands import handle_command, is_command
 logger = logging.getLogger(__name__)
 
 _MAX_LEN = 4096
+_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 _TYPING_INTERVAL = 4       # seconds — Telegram's indicator expires after 5s
 _MSG_DELAY = 0.8           # seconds between split messages
 _SENTENCE_SPLIT = re.compile(r'(?<=[.!?…])\s+')
@@ -60,6 +61,13 @@ def create_telegram_app(iris) -> FastAPI:
 
     if not bot_token:
         raise ValueError("TELEGRAM_BOT_TOKEN no está configurado en .env")
+
+    secret = settings.telegram.webhook_secret
+    if not secret:
+        logger.warning(
+            "[Telegram] Sin secreto de webhook — cualquiera que dé con la URL "
+            "podría hacerse pasar por ti. Define TELEGRAM_WEBHOOK_SECRET."
+        )
 
     bot = Bot(token=bot_token)
     app = FastAPI()
@@ -107,6 +115,13 @@ def create_telegram_app(iris) -> FastAPI:
 
     @app.post("/webhook")
     async def webhook(request: Request) -> Response:
+        # Telegram devuelve en esta cabecera el secreto que le dimos al registrar
+        # el webhook. Es lo único que distingue un update suyo de uno fabricado:
+        # el owner_id viaja DENTRO del cuerpo, así que quien llama se lo inventa.
+        if secret and request.headers.get(_SECRET_HEADER) != secret:
+            logger.warning("[Telegram] Update rechazado — secreto del webhook incorrecto")
+            return Response(status_code=403)
+
         try:
             data   = await request.json()
             update = Update.de_json(data, bot)

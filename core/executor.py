@@ -47,6 +47,7 @@ def run_claude(
     system_prompt: str = "",
     resume_session: str = "",
     json_schema: dict = None,
+    allowed_tools: str = "",
 ):
     """
     Ejecuta Claude donde toque y devuelve un ClaudeResult.
@@ -62,7 +63,7 @@ def run_claude(
             {
                 "prompt": prompt, "file_path": file_path,
                 "system_prompt": system_prompt, "resume_session": resume_session,
-                "json_schema": json_schema,
+                "json_schema": json_schema, "allowed_tools": allowed_tools,
             },
             timeout=float(ClaudeTimeout()),
         )
@@ -74,6 +75,7 @@ def run_claude(
             system_prompt=system_prompt,
             resume_session=resume_session,
             json_schema=json_schema,
+            allowed_tools=allowed_tools,
         )
 
     ledger.record(result)
@@ -156,6 +158,7 @@ def build_local_handlers() -> dict:
             system_prompt=payload.get("system_prompt", ""),
             resume_session=payload.get("resume_session", ""),
             json_schema=payload.get("json_schema"),
+            allowed_tools=payload.get("allowed_tools", ""),
         )
         return result.to_dict()
 

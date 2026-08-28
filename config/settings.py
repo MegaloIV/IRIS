@@ -6,6 +6,7 @@ Toda la configuración del proyecto Iris.
 from pydantic import BaseModel
 from typing import Optional
 from dotenv import load_dotenv
+import hashlib
 import os
 
 load_dotenv()
@@ -103,9 +104,56 @@ class CompanionConfig(BaseModel):
     startup_timeout: int = int(os.getenv("COMPANION_STARTUP_TIMEOUT", "8"))
 
 
+def _default_public_url() -> str:
+    """
+    URL por la que se llega a Iris desde fuera. Solo importa en modo servidor.
+
+    Se deriva de IRIS_DOMAIN — el mismo valor que usa Caddy en docker-compose —
+    para no tener dos variables que decir lo mismo y poder desincronizarse.
+    """
+    explicito = os.getenv("IRIS_PUBLIC_URL", "").strip().rstrip("/")
+    if explicito:
+        return explicito
+    dominio = os.getenv("IRIS_DOMAIN", "").strip()
+    return f"https://{dominio}" if dominio else ""
+
+
+class JournalConfig(BaseModel):
+    """
+    La vida interior: qué hace Iris cuando nadie la mira.
+
+    Los valores por defecto siguen el despliegue por etapas del plan: el diario
+    se llena desde el primer día, pero `share_enabled` empieza en false para que
+    puedas leer con /diario qué se está formando antes de dejarle interrumpirte.
+    Cuando te apetezca, lo activas y vas bajando `impulse_threshold` desde 0.75
+    hasta el punto donde te alegra que escriba en vez de molestarte.
+    """
+    enabled: bool = os.getenv("JOURNAL_ENABLED", "true").lower() == "true"
+    # Escribir al diario es barato y privado; mandarte un mensaje no lo es.
+    share_enabled: bool = os.getenv("JOURNAL_SHARE_ENABLED", "false").lower() == "true"
+    impulse_threshold: float = float(os.getenv("JOURNAL_IMPULSE_THRESHOLD", "0.75"))
+    # Minutos entre ticks. Es un rango, no un número: 30 exactos se notan y
+    # parecen un cron, que es justo lo contrario de lo que se busca.
+    interval_min: int = int(os.getenv("JOURNAL_INTERVAL_MIN", "20"))
+    interval_max: int = int(os.getenv("JOURNAL_INTERVAL_MAX", "40"))
+    # Pensar cansa. Sin coste, rumiaría sin parar; con él, el ciclo se autorregula.
+    energy_cost: float = float(os.getenv("JOURNAL_ENERGY_COST", "4"))
+    energy_floor: float = float(os.getenv("JOURNAL_ENERGY_FLOOR", "30"))
+    # Las actividades usan Claude en el portátil, o sea cuota de la suscripción.
+    max_activities_per_day: int = int(os.getenv("JOURNAL_MAX_ACTIVITIES", "3"))
+
+    def model_post_init(self, __context):
+        if self.interval_min > self.interval_max:
+            raise ValueError(
+                f"JOURNAL_INTERVAL_MIN ({self.interval_min}) no puede ser mayor "
+                f"que JOURNAL_INTERVAL_MAX ({self.interval_max})."
+            )
+
+
 class ServerConfig(BaseModel):
     host: str = os.getenv("SERVER_HOST", "0.0.0.0")
     port: int = int(os.getenv("SERVER_PORT", "8000"))
+    public_url: str = _default_public_url()
 
 
 class ModeConfig(BaseModel):
@@ -140,11 +188,33 @@ class ModeConfig(BaseModel):
 _raw_owner_id = os.getenv("TELEGRAM_OWNER_ID", "")
 
 
+def _default_webhook_secret() -> str:
+    """
+    Secreto que Telegram devuelve en cada petición al webhook.
+
+    Sin él, la única defensa del endpoint es el `owner_id` que viene DENTRO del
+    cuerpo del POST — o sea, un dato que lo pone quien llama. En local, detrás
+    de un túnel efímero, casi da igual; con un dominio fijo y público, cualquiera
+    que dé con la URL puede fabricar un update diciendo ser tú, y Iris le haría
+    caso: leerle archivos, mirar la pantalla, abrir programas.
+
+    Si no se define, se deriva del token del bot. No es un secreto independiente,
+    pero quien tenga el token del bot ya controla el bot entero, así que no
+    debilita nada — y evita una variable más que rellenar a mano.
+    """
+    explicito = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+    if explicito:
+        return explicito
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    return hashlib.sha256(token.encode()).hexdigest()[:32] if token else ""
+
+
 class TelegramConfig(BaseModel):
     enabled: bool = os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"
     bot_token: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
     owner_id: Optional[int] = int(_raw_owner_id) if _raw_owner_id.lstrip("-").isdigit() else None
     webhook_url: Optional[str] = os.getenv("TELEGRAM_WEBHOOK_URL")
+    webhook_secret: str = _default_webhook_secret()
     tts_enabled: bool = os.getenv("TELEGRAM_TTS_ENABLED", "false").lower() == "true"
     stt_enabled: bool = os.getenv("TELEGRAM_STT_ENABLED", "false").lower() == "true"
 
@@ -161,6 +231,7 @@ class Settings(BaseModel):
     server: ServerConfig = ServerConfig()
     mode: ModeConfig = ModeConfig()
     telegram: TelegramConfig = TelegramConfig()
+    journal: JournalConfig = JournalConfig()
 
 
 settings = Settings()
