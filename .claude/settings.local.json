@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(cd \"c:\\\\Matias\\\\Repositorios\\\\IRIS\" ; Get-ChildItem -Recurse -maxdepth 2 -Filter @\\(\"pytest.ini\", \"tox.ini\", \"Makefile\", \"setup.py\", \".github\"\\) -ErrorAction SilentlyContinue)",
+      "Bash(git -C /mnt/c/Matias/Repositorios/IRIS worktree list)",
+      "Skill(update-config)",
+      "Bash(python3 *)",
+      "WebSearch",
+      "WebFetch(domain:amanhimself.dev)",
+      "WebFetch(domain:dev.to)",
+      "Bash(python *)",
+      "Artifact",
+      "Bash(timeout 400 ./venv/Scripts/python.exe _verify2.py)",
+      "Bash(timeout 180 ./venv/Scripts/python.exe scripts/migrate_graph.py)",
+      "Bash(./venv/Scripts/python.exe -c ' *)",
+      "Bash(timeout 200 ./venv/Scripts/python.exe _t2.py)",
+      "Bash(git check-ignore *)"
+    ]
+  }
+}

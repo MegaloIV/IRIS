@@ -65,7 +65,11 @@ class TTSEngine:
         self.current_key_index += 1
         if self.current_key_index >= len(self.api_keys):
             self.current_key_index = 0  # resetear para que la próxima llamada no crashee
-            raise Exception("Se han agotado todas las API keys de ElevenLabs (Límite de cuota o bloqueadas).")
+            raise Exception(
+                "Ninguna API key de ElevenLabs funcionó. Mira el aviso de arriba: "
+                "401 = clave inválida o revocada (hay que renovarla), "
+                "402 = sin créditos, 429 = límite de peticiones por ahora."
+            )
         logging.info(f"[TTS] Rotando a API Key {self.current_key_index + 1}/{len(self.api_keys)}")
 
     def _synthesize(self, text: str) -> tuple[np.ndarray, int]:
@@ -103,7 +107,16 @@ class TTSEngine:
                     return audio_float, 24000
                 
                 elif response.status_code in [401, 402, 429]:
-                    logging.warning(f"[TTS] Falló key {self.current_key_index + 1} (Status {response.status_code}). Rotando...")
+                    # Los tres rotan, pero no significan lo mismo y decirlo mal
+                    # manda a buscar el problema donde no está: un 401 no se
+                    # arregla esperando a que se renueve la cuota.
+                    motivo = {401: "clave inválida o revocada",
+                              402: "sin créditos",
+                              429: "límite de peticiones"}[response.status_code]
+                    logging.warning(
+                        f"[TTS] Key {self.current_key_index + 1} rechazada — "
+                        f"{motivo} (HTTP {response.status_code}). Rotando..."
+                    )
                     self._rotate_key()
                 else:
                     logging.error(f"[TTS] Error API ElevenLabs ({response.status_code}): {response.text}")

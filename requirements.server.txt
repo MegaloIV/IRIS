@@ -16,3 +16,10 @@ requests>=2.31.0
 
 python-telegram-bot>=21.0
 apscheduler>=3.10.0
+
+# Transcripción y síntesis. El servidor no graba ni reproduce audio —de eso se
+# encarga el portátil— pero sí convierte: el WAV que llega por el WebSocket y las
+# notas de voz de Telegram los transcribe la API de Groq, y voice/stt.py y
+# voice/tts.py importan numpy al cargarse.
+groq>=0.11.0
+numpy>=1.24.0

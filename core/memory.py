@@ -210,6 +210,12 @@ class MemoryManager:
                 logging.info(f"[Memory] {n} memorias caducadas olvidadas.")
         except Exception as e:
             logging.warning(f"[Memory] No pude purgar caducadas: {e}")
+        try:
+            n = self.storage.events.purge_expired()
+            if n:
+                logging.info(f"[Eventos] {n} registros caducados borrados.")
+        except Exception as e:
+            logging.debug(f"[Eventos] No pude purgar: {e}")
 
     # ─── Sesión activa ────────────────────────────────────────────────────────
 

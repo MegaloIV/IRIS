@@ -150,6 +150,34 @@ class JournalConfig(BaseModel):
             )
 
 
+def _default_brain_token() -> str:
+    """
+    Llave del editor del cerebro cuando se sirve desde internet.
+
+    Es un secreto propio y NO el `IRIS_AGENT_TOKEN` a posta: aquel autoriza a
+    ejecutar Claude en el portátil con acceso a archivos, y va a viajar por un
+    chat de Telegram cada vez que pidas el enlace. Que se filtre uno no debe
+    entregar el otro.
+
+    Si no se define, se deriva del token del enlace — así funciona sin
+    configurar nada, pero sigue siendo un valor distinto.
+    """
+    explicito = os.getenv("BRAIN_TOKEN", "").strip()
+    if explicito:
+        return explicito
+    base = os.getenv("IRIS_AGENT_TOKEN", "")
+    return hashlib.sha256(("cerebro:" + base).encode()).hexdigest()[:32] if base else ""
+
+
+class BrainConfig(BaseModel):
+    """El editor visual del cerebro."""
+    port: int = int(os.getenv("BRAIN_PORT", "8765"))
+    token: str = _default_brain_token()
+    # Si se sirve desde internet, ¿deja escribir? Se puede apagar para que desde
+    # fuera solo se pueda mirar.
+    remote_write: bool = os.getenv("BRAIN_REMOTE_WRITE", "true").lower() == "true"
+
+
 class ServerConfig(BaseModel):
     host: str = os.getenv("SERVER_HOST", "0.0.0.0")
     port: int = int(os.getenv("SERVER_PORT", "8000"))
@@ -232,6 +260,7 @@ class Settings(BaseModel):
     mode: ModeConfig = ModeConfig()
     telegram: TelegramConfig = TelegramConfig()
     journal: JournalConfig = JournalConfig()
+    brain: BrainConfig = BrainConfig()
 
 
 settings = Settings()

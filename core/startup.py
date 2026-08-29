@@ -154,6 +154,19 @@ def run_api_server(iris):
 
     app = create_api(iris)
 
+    # El editor del cerebro, con llave. Se monta aquí y no en su propio puerto
+    # porque así hereda el TLS de Caddy — y sin HTTPS mandar el token por la URL
+    # sería regalarlo a cualquiera que mire el tráfico.
+    if settings.brain.token:
+        try:
+            from interfaces.brain_api import create_brain_api
+            app.mount("/cerebro", create_brain_api(iris, exigir_token=True))
+            print("[Cerebro] Editor montado en /cerebro (requiere token)")
+        except Exception as e:
+            print(f"[Cerebro] No se pudo montar el editor: {e}")
+    else:
+        print("[Cerebro] Sin BRAIN_TOKEN — el editor no se expone.")
+
     if settings.telegram.enabled and settings.telegram.bot_token:
         try:
             from interfaces.telegram_bot import create_telegram_app

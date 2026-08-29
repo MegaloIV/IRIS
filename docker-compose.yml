@@ -7,9 +7,18 @@
 # La base de datos NO está aquí — vive en Supabase. Así recrear la instancia no
 # se lleva por delante la memoria de Iris.
 
+# Red con nombre FIJO. Compose, por defecto, la llama <directorio>_default, así
+# que CADDY_INGRESS_NETWORKS tendría que adivinar cómo se llama la carpeta donde
+# clonaste esto. Con "default" a secas, caddy-docker-proxy no encontraba el
+# contenedor y respondía 503 a todo: "Container is not in same network as caddy".
+networks:
+  iris:
+    name: iris_net
+
 services:
   iris:
     build: .
+    networks: [iris]
     restart: unless-stopped
     env_file: .env
     environment:
@@ -31,8 +40,9 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    networks: [iris]
     environment:
-      CADDY_INGRESS_NETWORKS: default
+      CADDY_INGRESS_NETWORKS: iris_net
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - caddy_data:/data

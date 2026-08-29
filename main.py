@@ -9,7 +9,12 @@ import sys
 import warnings
 import signal
 import threading
-from PyQt6.QtWidgets import QApplication
+
+# PyQt6 y ui/ NO se importan aquí a propósito: son del lado cliente y en el
+# servidor no están instalados. A nivel de módulo se importan ANTES de que
+# main() pueda mirar IRIS_MODE, así que el contenedor reventaba nada más
+# arrancar —"ModuleNotFoundError: No module named 'PyQt6'"— sin llegar nunca a
+# run_server(). Van dentro de main(), que es el único camino que los usa.
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -76,9 +81,6 @@ def run_server():
         iris.shutdown()
 
 
-from ui.avatar import IrisAvatarUI
-from ui.signals import IrisSignals
-from ui.terminal_overlay import TerminalOutputUI
 from core.startup import setup_telegram, setup_proactive, setup_voice, setup_agent_link
 from core.commands import handle_command, dispatch_input, is_command
 
@@ -86,6 +88,12 @@ from core.commands import handle_command, dispatch_input, is_command
 def main():
     if settings.mode.mode == "server":
         return run_server()
+
+    # A partir de aquí es el escritorio, y solo aquí hace falta Qt.
+    from PyQt6.QtWidgets import QApplication
+    from ui.avatar import IrisAvatarUI
+    from ui.signals import IrisSignals
+    from ui.terminal_overlay import TerminalOutputUI
 
     print("=" * 50)
     print(f"  IRIS — Iniciando sistema... (modo {settings.mode.mode})")

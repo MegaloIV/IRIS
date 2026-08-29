@@ -15,6 +15,7 @@ from storage.base import (
     BasePreferenceStorage,
     BaseStateStorage,
     BaseVectorStorage,
+    BaseEventStorage,
     BaseGraphStorage,
 )
 
@@ -29,6 +30,13 @@ class _DummyGraphStorage(BaseGraphStorage):
     def get_owner_graph(self, owner_name, depth=1): return ""
     def save(self): pass
     def close(self): pass
+    # Sin Postgres no hay grafo: se cumple la interfaz devolviendo vacío, que es
+    # la verdad —no hay nodos— y no que la operación haya fallado.
+    def all_entities(self): return []
+    def all_relations(self): return []
+    def delete_entity(self, name): return -1
+    def delete_relation(self, from_name, relation, to_name): return False
+    def rename_entity(self, old_name, new_name): return False
     # Helpers internos que el dummy no necesita implementar
     def get_deep_context(self, entity_name, relation_types, depth=2): return []
     def get_context_by_relation(self, entity_name, relation_types): return []
@@ -54,6 +62,7 @@ class StorageFactory:
             try:
                 from storage.supabase import (
                     init_supabase_schema,
+                    SupabaseEventStorage,
                     SupabaseHistoryStorage,
                     SupabaseJournalStorage,
                     SupabasePreferenceStorage,
@@ -66,6 +75,7 @@ class StorageFactory:
                 self.vector: BaseVectorStorage           = SupabaseVectorStorage()
                 self.preferences: BasePreferenceStorage  = SupabasePreferenceStorage()
                 self.journal: BaseJournalStorage         = SupabaseJournalStorage()
+                self.events: BaseEventStorage            = SupabaseEventStorage()
                 logging.info("[Storage] Supabase conectado.")
                 return
             except Exception as e:
@@ -74,6 +84,7 @@ class StorageFactory:
 
         # Fallback local
         from storage.sqlite_fallback import (
+            SQLiteEventStorage,
             SQLiteHistoryStorage,
             SQLiteJournalStorage,
             SQLitePreferenceStorage,
@@ -85,6 +96,7 @@ class StorageFactory:
         self.vector      = ChromaVectorStorage()
         self.preferences = SQLitePreferenceStorage()
         self.journal     = SQLiteJournalStorage()
+        self.events      = SQLiteEventStorage()
         logging.info("[Storage] SQLite + ChromaDB activos (modo local).")
 
     def _init_graph(self):
@@ -109,7 +121,7 @@ class StorageFactory:
 
     def close(self):
         for backend in (self.graph, self.vector, self.history, self.state,
-                        self.preferences, self.journal):
+                        self.preferences, self.journal, self.events):
             try:
                 if hasattr(backend, "close"):
                     backend.close()

@@ -175,6 +175,19 @@ class IrisAgent:
                 )
         return ""
 
+    def registrar(self, kind: str, summary: str, detail: dict = None, ttl_days: int = 30) -> None:
+        """
+        Anota algo que hizo Iris. Nunca lanza.
+
+        Un registro no puede tumbar la conversación que está registrando — sería
+        la peor relación coste/beneficio posible. Si la base no responde, se
+        pierde el evento y sigue el turno.
+        """
+        try:
+            self.storage.events.add(kind, summary, detail or {}, ttl_days)
+        except Exception as e:
+            logging.debug(f"[Eventos] No pude registrar '{kind}': {e}")
+
     def _cerrar_diario(self, respuesta: str) -> None:
         """Si acabó sacando lo que había pensado, que quede como contado."""
         diario = getattr(self, "journal", None)
@@ -683,6 +696,7 @@ class IrisAgent:
             # se durmió, o tardó más que el timeout. Cubre también AgentUnavailable,
             # que hereda de LinkError.
             logging.warning(f"[Claude] Enlace con el portátil caído: {e}")
+            self.registrar("error", f"Enlace con el portátil caído: {e}", ttl_days=90)
             return self.chat(
                 f"[Empezaste la tarea y perdiste el acceso al portátil a media faena. "
                 f"Díselo con tu estilo, sin tecnicismos.] {user_input}",
@@ -706,6 +720,12 @@ class IrisAgent:
         self._claude_session = (claude.session_id, self._personality_snapshot())
         response_text        = claude.text
         self._cerrar_diario(response_text)
+        self.registrar(
+            "delegacion",
+            f"{intent.get('task_type', 'tarea')}: {user_input[:70]}",
+            {"coste_usd": round(claude.cost_usd, 4), "ms": claude.duration_ms,
+             "turnos": claude.num_turns, "archivo": bool(intent.get("file_path"))},
+        )
 
         self.history.append_turn(user_input, response_text)
         self.personality.save_state()

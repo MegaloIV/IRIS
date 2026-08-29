@@ -7,7 +7,7 @@ Telegram. Lo único que cambia por canal es si se permite apagar el proceso.
 """
 
 COMMANDS = frozenset({
-    "/status", "/memoria", "/gustos", "/coste", "/diario",
+    "/status", "/memoria", "/gustos", "/coste", "/diario", "/cerebro", "/eventos",
     "/guardar", "/reset", "/trust", "/energy", "/salir",
 })
 
@@ -67,6 +67,33 @@ def handle_command(cmd: str, iris, allow_shutdown: bool = True) -> str:
             # cómo responde Iris (personality.build_system_prompt); esto sirve
             # para calibrar el umbral y ver qué se está asentando.
             out.append(iris.preferences.summary())
+
+        case "/cerebro":
+            # Ver y editar lo que tiene en la cabeza: memorias, grafo y gustos.
+            # Recibe el resto de palabras porque tiene subcomandos propios.
+            from core.brain_view import handle as ver_cerebro
+            out.append(ver_cerebro(iris, parts[1:]))
+
+        case "/eventos":
+            # Qué ha hecho Iris últimamente. Filtra por tipo si se le pasa uno:
+            # /eventos proactivo | diario | delegacion | error
+            tipo = parts[1] if len(parts) > 1 else ""
+            try:
+                filas = iris.storage.events.recent(20, tipo)
+            except Exception as e:
+                filas = []
+                out.append(f"[No pude leer los eventos: {e}]")
+            if not filas:
+                out.append(f"Sin eventos{f' de tipo {tipo}' if tipo else ''} todavía.")
+            else:
+                out.append(f"{len(filas)} eventos" + (f" de tipo {tipo}" if tipo else "") + ":")
+                for e in filas:
+                    at = str(e["at"])[:16].replace("T", " ")
+                    out.append(f"  [{at}] {e['kind']:10} {e['summary'][:70]}")
+                    if e.get("detail"):
+                        det = ", ".join(f"{k}={v}" for k, v in e["detail"].items())
+                        if det:
+                            out.append(f"                        {det[:80]}")
 
         case "/diario":
             # Lo que ha pensado sin ti delante. Vale la pena leerlo un tiempo

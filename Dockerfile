@@ -27,6 +27,19 @@ COPY config/  ./config/
 COPY core/    ./core/
 COPY storage/ ./storage/
 COPY interfaces/ ./interfaces/
+# scripts/: core/startup.py importa de aquí register_webhook. Sin esta línea el
+# webhook de Telegram no se registra al arrancar — y falla dentro de un hilo, o
+# sea en silencio, que es justo el problema que register_webhook venía a resolver.
+COPY scripts/ ./scripts/
+# voice/: aquí no se graba ni se reproduce nada, pero el servidor sí TRANSCRIBE.
+# El portátil manda el WAV por el WebSocket y las notas de voz de Telegram llegan
+# como audio; las dos cosas pasan por voice/stt.py. voice/tts.py sintetiza las
+# respuestas de voz de Telegram (por eso ffmpeg más arriba).
+COPY voice/ ./voice/
+# ui/brain: la página del editor del cerebro. Del resto de ui/ (avatar, ventanas)
+# aquí no hay nada que hacer —no hay pantalla— pero esta sí se sirve por HTTP,
+# así que el fichero tiene que existir dentro de la imagen.
+COPY ui/brain/ ./ui/brain/
 COPY main.py .
 
 ENV IRIS_MODE=server \

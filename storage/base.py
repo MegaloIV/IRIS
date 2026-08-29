@@ -40,6 +40,20 @@ class BaseVectorStorage(ABC):
     def count(self) -> int: ...
 
     @abstractmethod
+    def delete(self, memory_id: str) -> bool:
+        """Olvida una memoria concreta. True si existía."""
+        ...
+
+    @abstractmethod
+    def update(self, memory_id: str, content: str) -> bool:
+        """
+        Corrige el texto de una memoria. Reindexa el embedding, porque si no
+        el vector seguiría apuntando a lo que decía antes y se recuperaría con
+        las consultas equivocadas.
+        """
+        ...
+
+    @abstractmethod
     def purge_expired(self) -> int:
         """
         Borra las memorias caducadas y devuelve cuántas.
@@ -124,6 +138,36 @@ class BaseJournalStorage(ABC):
     def count(self) -> int: ...
 
 
+class BaseEventStorage(ABC):
+    """
+    Qué ha hecho Iris. NO es el log del proceso.
+
+    La diferencia importa: el log crudo ya lo guarda Docker, y meterlo en la
+    misma base que la memoria añade escrituras por cada línea y un modo de fallo
+    tonto — si la base se cae, pierdes justo los registros que explicarían por
+    qué se cayó.
+
+    Aquí van cosas con significado: que te escribió por iniciativa propia y por
+    qué, cada entrada de diario, cada delegación con su coste, y los errores que
+    hoy se traga un `except`. Sirve para responder «¿qué ha hecho esta semana?»,
+    que ahora mismo no se puede contestar.
+
+    Todo caduca. Un registro de hace tres meses no explica nada y solo engorda.
+    """
+
+    @abstractmethod
+    def add(self, kind: str, summary: str, detail: dict = None, ttl_days: int = 30) -> None: ...
+
+    @abstractmethod
+    def recent(self, n: int = 30, kind: str = "") -> list[dict]: ...
+
+    @abstractmethod
+    def purge_expired(self) -> int: ...
+
+    @abstractmethod
+    def count(self) -> int: ...
+
+
 class BaseGraphStorage(ABC):
     @abstractmethod
     def add_entity(self, name: str, entity_type: str, properties: dict) -> None: ...
@@ -142,6 +186,37 @@ class BaseGraphStorage(ABC):
 
     @abstractmethod
     def save(self) -> None: ...
+
+    @abstractmethod
+    def all_entities(self) -> list[dict]:
+        """Todas las entidades, para poder mirarlas de una vez."""
+        ...
+
+    @abstractmethod
+    def all_relations(self) -> list[dict]:
+        """Todas las aristas, en su dirección real."""
+        ...
+
+    @abstractmethod
+    def delete_entity(self, name: str) -> int:
+        """Borra una entidad y, con ella, sus aristas. Devuelve cuántas cayeron."""
+        ...
+
+    @abstractmethod
+    def delete_relation(self, from_name: str, relation: str, to_name: str) -> bool:
+        """Borra una arista concreta y deja las entidades donde están."""
+        ...
+
+    @abstractmethod
+    def rename_entity(self, old_name: str, new_name: str) -> bool:
+        """
+        Cambia el nombre de una entidad arrastrando sus aristas.
+
+        Hace falta porque la extracción a veces guarda "Lucia" y "Lucía" como dos
+        personas distintas, y sin esto la única salida es borrar una y perder sus
+        relaciones.
+        """
+        ...
 
     def get_entity_names(self) -> list[str]:
         """

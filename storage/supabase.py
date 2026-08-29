@@ -13,7 +13,7 @@ import logging
 import os
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import psycopg2
@@ -22,6 +22,7 @@ import psycopg2.pool
 
 from config.settings import settings
 from storage.base import (
+    BaseEventStorage,
     BaseGraphStorage,
     BaseHistoryStorage,
     BaseJournalStorage,
@@ -208,6 +209,22 @@ def init_supabase_schema():
                 last_reinforced TIMESTAMPTZ DEFAULT NOW(),
                 evidence        JSONB DEFAULT '[]'
             );
+        """)
+
+        # Eventos — qué ha hecho Iris, no el log crudo del proceso
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS iris_events (
+                id         BIGSERIAL PRIMARY KEY,
+                at         TIMESTAMPTZ DEFAULT NOW(),
+                kind       TEXT NOT NULL,
+                summary    TEXT NOT NULL,
+                detail     JSONB DEFAULT '{}',
+                expires_at DATE
+            );
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_events_recientes
+            ON iris_events (at DESC);
         """)
 
         # Diario — lo que hace y piensa cuando no hay nadie delante
@@ -433,6 +450,22 @@ class SupabaseVectorStorage(BaseVectorStorage):
             )
             return [dict(r) for r in cur.fetchall()]
 
+    def delete(self, memory_id: str) -> bool:
+        with _cursor(commit=True) as cur:
+            cur.execute("DELETE FROM iris_memories WHERE id = %s", (memory_id,))
+            return (cur.rowcount or 0) > 0
+
+    def update(self, memory_id: str, content: str) -> bool:
+        # Se reindexa el embedding: si no, el vector seguiría apuntando al texto
+        # viejo y la memoria corregida se recuperaría con las consultas de antes.
+        embedding = self._embed(content)
+        with _cursor(commit=True) as cur:
+            cur.execute(
+                "UPDATE iris_memories SET content = %s, embedding = %s WHERE id = %s",
+                (content, embedding, memory_id),
+            )
+            return (cur.rowcount or 0) > 0
+
     def purge_expired(self) -> int:
         """Borra de verdad lo que ya caducó. Filtrar al leer no basta: si no se
         borra, la tabla crece sin techo y el índice vectorial con ella."""
@@ -508,6 +541,44 @@ class SupabasePreferenceStorage(BasePreferenceStorage):
     def count(self) -> int:
         with _cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM iris_preferences")
+            return cur.fetchone()[0]
+
+
+# ─── Event Storage ────────────────────────────────────────────────────────────
+
+_EVENT_COLS = "id, at, kind, summary, detail, expires_at"
+
+
+class SupabaseEventStorage(BaseEventStorage):
+
+    def add(self, kind: str, summary: str, detail: dict = None, ttl_days: int = 30) -> None:
+        caduca = (datetime.now() + timedelta(days=ttl_days)).date() if ttl_days else None
+        with _cursor(commit=True) as cur:
+            cur.execute(
+                "INSERT INTO iris_events (kind, summary, detail, expires_at) VALUES (%s,%s,%s,%s)",
+                (kind, summary, json.dumps(detail or {}), caduca),
+            )
+
+    def recent(self, n: int = 30, kind: str = "") -> list[dict]:
+        filtro = "WHERE kind = %s" if kind else ""
+        params = ([kind, n] if kind else [n])
+        with _cursor(dict_rows=True) as cur:
+            cur.execute(
+                f"SELECT {_EVENT_COLS} FROM iris_events {filtro} ORDER BY at DESC LIMIT %s",
+                params,
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def purge_expired(self) -> int:
+        with _cursor(commit=True) as cur:
+            cur.execute(
+                "DELETE FROM iris_events WHERE expires_at IS NOT NULL AND expires_at < CURRENT_DATE"
+            )
+            return cur.rowcount or 0
+
+    def count(self) -> int:
+        with _cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM iris_events")
             return cur.fetchone()[0]
 
 
@@ -827,6 +898,84 @@ class PostgresGraphStorage(BaseGraphStorage):
         return "\n".join(lines)
 
     # ─── Utils ────────────────────────────────────────────────────────────────
+
+    def all_entities(self) -> list[dict]:
+        with _cursor(dict_rows=True) as cur:
+            cur.execute("""
+                SELECT e.name, e.type, e.updated_at,
+                       (SELECT COUNT(*) FROM iris_relations r
+                         WHERE r.from_name = e.name OR r.to_name = e.name) AS grado
+                FROM iris_entities e
+                ORDER BY grado DESC, e.name
+            """)
+            return [dict(r) for r in cur.fetchall()]
+
+    def all_relations(self) -> list[dict]:
+        with _cursor(dict_rows=True) as cur:
+            cur.execute("""
+                SELECT from_name, relation, to_name, context, rel_date, history
+                FROM iris_relations ORDER BY from_name, relation
+            """)
+            return [dict(r) for r in cur.fetchall()]
+
+    def delete_entity(self, name: str) -> int:
+        with _cursor(commit=True) as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM iris_relations WHERE from_name = %s OR to_name = %s",
+                (name, name),
+            )
+            aristas = cur.fetchone()[0]
+            # Las aristas se van solas: la FK lleva ON DELETE CASCADE.
+            cur.execute("DELETE FROM iris_entities WHERE name = %s", (name,))
+            return aristas if cur.rowcount else -1
+
+    def delete_relation(self, from_name: str, relation: str, to_name: str) -> bool:
+        with _cursor(commit=True) as cur:
+            cur.execute(
+                "DELETE FROM iris_relations WHERE from_name=%s AND relation=%s AND to_name=%s",
+                (from_name, relation, to_name),
+            )
+            return (cur.rowcount or 0) > 0
+
+    def rename_entity(self, old_name: str, new_name: str) -> bool:
+        """
+        Renombra arrastrando las aristas. Si el nombre nuevo ya existe, fusiona.
+
+        Fusionar es el caso normal, no el raro: la extracción guarda "Lucia" y
+        "Lucía" como dos personas distintas, y lo que quieres es juntarlas sin
+        perder las relaciones de ninguna de las dos.
+        """
+        with _cursor(commit=True) as cur:
+            cur.execute("SELECT 1 FROM iris_entities WHERE name = %s", (old_name,))
+            if cur.fetchone() is None:
+                return False
+
+            cur.execute(
+                "INSERT INTO iris_entities (name, type) "
+                "SELECT %s, type FROM iris_entities WHERE name = %s "
+                "ON CONFLICT (name) DO NOTHING",
+                (new_name, old_name),
+            )
+
+            # Primero fuera las que quedarían repetidas al renombrar; si no, el
+            # UPDATE choca con la clave primaria (from_name, relation, to_name).
+            for col, otro in (("from_name", "to_name"), ("to_name", "from_name")):
+                cur.execute(
+                    f"""DELETE FROM iris_relations a
+                         WHERE a.{col} = %s
+                           AND EXISTS (SELECT 1 FROM iris_relations b
+                                        WHERE b.{col} = %s
+                                          AND b.relation = a.relation
+                                          AND b.{otro}   = a.{otro})""",
+                    (old_name, new_name),
+                )
+                cur.execute(
+                    f"UPDATE iris_relations SET {col} = %s WHERE {col} = %s",
+                    (new_name, old_name),
+                )
+
+            cur.execute("DELETE FROM iris_entities WHERE name = %s", (old_name,))
+            return True
 
     def get_entity_names(self) -> list[str]:
         with _cursor() as cur:

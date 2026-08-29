@@ -249,6 +249,17 @@ def create_telegram_app(iris) -> FastAPI:
             except Exception as e:
                 logger.warning(f"[Telegram] TTS falló, enviando texto: {e}")
 
+        if wants_voice:
+            # Pidió voz y no hubo voz. Lo que ella escribió da por hecho que el
+            # audio llega ("aquí tienes el audio"), así que mandarlo tal cual es
+            # decirle al usuario algo que no es verdad: ve un mensaje anunciando
+            # un audio que nunca aparece. Mejor que lo sepa.
+            logger.warning("[Telegram] Se pidió voz pero no se pudo sintetizar; avisando por texto.")
+            response_text = (
+                f"{response_text}\n\n"
+                "(quería mandártelo en audio pero mi voz no está disponible ahora mismo)"
+            )
+
         # Send as text (default, or fallback if TTS failed)
         parts = _split_into_messages(response_text)
         for i, part in enumerate(parts):

@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import chromadb
@@ -17,6 +17,7 @@ from chromadb.utils import embedding_functions
 from config.settings import settings
 from storage.base import (
     BaseHistoryStorage,
+    BaseEventStorage,
     BaseJournalStorage,
     BasePreferenceStorage,
     BaseStateStorage,
@@ -258,6 +259,55 @@ class SQLiteJournalStorage(BaseJournalStorage):
 
 # ─── ChromaDB Vector ──────────────────────────────────────────────────────────
 
+class SQLiteEventStorage(BaseEventStorage):
+
+    def __init__(self, path: str = "data/iris.db"):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS iris_events (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                at         TEXT,
+                kind       TEXT NOT NULL,
+                summary    TEXT NOT NULL,
+                detail     TEXT DEFAULT '{}',
+                expires_at TEXT
+            )
+        """)
+        self.conn.commit()
+
+    def add(self, kind: str, summary: str, detail: dict = None, ttl_days: int = 30) -> None:
+        caduca = (datetime.now() + timedelta(days=ttl_days)).strftime("%Y-%m-%d") if ttl_days else None
+        self.conn.execute(
+            "INSERT INTO iris_events (at, kind, summary, detail, expires_at) VALUES (?,?,?,?,?)",
+            (datetime.now().isoformat(), kind, summary, json.dumps(detail or {}), caduca),
+        )
+        self.conn.commit()
+
+    def recent(self, n: int = 30, kind: str = "") -> list[dict]:
+        sql = "SELECT id, at, kind, summary, detail, expires_at FROM iris_events"
+        args: list = []
+        if kind:
+            sql += " WHERE kind = ?"; args.append(kind)
+        sql += " ORDER BY at DESC LIMIT ?"; args.append(n)
+        filas = self.conn.execute(sql, args).fetchall()
+        return [{"id": r[0], "at": r[1], "kind": r[2], "summary": r[3],
+                 "detail": json.loads(r[4] or "{}"), "expires_at": r[5]} for r in filas]
+
+    def purge_expired(self) -> int:
+        hoy = datetime.now().strftime("%Y-%m-%d")
+        cur = self.conn.execute(
+            "DELETE FROM iris_events WHERE expires_at IS NOT NULL AND expires_at < ?", (hoy,))
+        self.conn.commit()
+        return cur.rowcount or 0
+
+    def count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM iris_events").fetchone()[0]
+
+    def close(self):
+        self.conn.close()
+
+
 class ChromaVectorStorage(BaseVectorStorage):
 
     def __init__(self, path: str = "data/chromadb"):
@@ -310,6 +360,24 @@ class ChromaVectorStorage(BaseVectorStorage):
             for doc, meta in zip(results["documents"], results["metadatas"])
             if not self._caducada(meta)
         ]
+
+    def delete(self, memory_id: str) -> bool:
+        try:
+            self.collection.delete(ids=[memory_id])
+            return True
+        except Exception as e:
+            logging.warning(f"[Chroma] No pude borrar {memory_id}: {e}")
+            return False
+
+    def update(self, memory_id: str, content: str) -> bool:
+        try:
+            # Chroma reindexa solo al cambiar el documento: la función de
+            # embedding la tiene la colección.
+            self.collection.update(ids=[memory_id], documents=[content])
+            return True
+        except Exception as e:
+            logging.warning(f"[Chroma] No pude actualizar {memory_id}: {e}")
+            return False
 
     def purge_expired(self) -> int:
         if self.collection.count() == 0:

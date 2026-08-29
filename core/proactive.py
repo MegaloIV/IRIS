@@ -150,6 +150,10 @@ class ProactiveEngine:
         if settings.journal.enabled and getattr(self.iris, "journal", None):
             entrada = self.iris.journal.live_a_moment()
             if entrada:
+                self.iris.registrar(
+                    "diario", f"{entrada['kind']}: {entrada['content'][:70]}",
+                    {"impulso": entrada["impulse"], "id": entrada["id"]},
+                )
                 # Pensar cansa. Sin este coste rumiaría sin parar; con él el ciclo
                 # se autorregula solo — piensa, se cansa, descansa, vuelve — y esa
                 # curva se nota luego en su tono.
@@ -234,6 +238,11 @@ class ProactiveEngine:
         """Manda el mensaje y deja constancia de que lo inició ella."""
         pers = self.iris.personality
         self.send_fn(msg)
+        self.iris.registrar(
+            "proactivo", msg[:90],
+            {"mood": pers.state.mood.value, "energia": round(pers.state.energy),
+             "horas_sin_hablar": round(pers.hours_since_last_interaction(), 1)},
+        )
         pers.record_proactive_sent()
         self.iris.history.append_turn("[Iris inició la conversación]", msg)
         if pers.state.mood == Mood.LONELY:

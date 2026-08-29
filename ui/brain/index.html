@@ -1,0 +1,288 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>El cerebro de Iris</title>
+<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+<style>
+  :root{
+    --bg:#0d1414; --panel:#141d1d; --line:#2a3937; --ink:#e6edeb; --dim:#8b9e9a;
+    --acc:#4fc7b8; --warn:#e8a354; --bad:#f0907c;
+    --sans:ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;height:100vh;display:flex;background:var(--bg);color:var(--ink);
+       font:14px/1.5 var(--sans);overflow:hidden}
+  #red{flex:1;height:100vh}
+  aside{width:380px;border-left:1px solid var(--line);background:var(--panel);
+        display:flex;flex-direction:column}
+  header{padding:12px 16px;border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:15px;letter-spacing:-.01em}
+  #estado{color:var(--dim);font-size:12px;margin-top:3px}
+  nav{display:flex;border-bottom:1px solid var(--line)}
+  nav button{flex:1;background:none;border:0;border-bottom:2px solid transparent;
+             color:var(--dim);padding:9px 0;cursor:pointer;font:inherit;font-size:13px}
+  nav button.on{color:var(--acc);border-bottom-color:var(--acc)}
+  .panel{flex:1;overflow-y:auto;padding:14px 16px;display:none}
+  .panel.on{display:block}
+  .fila{border:1px solid var(--line);border-radius:7px;padding:9px 11px;margin-bottom:8px}
+  .meta{color:var(--dim);font-size:11px;margin-bottom:3px;
+        display:flex;justify-content:space-between;gap:8px}
+  .txt{white-space:pre-wrap;word-break:break-word}
+  .txt[contenteditable="true"]{outline:1px solid var(--acc);border-radius:4px;padding:3px}
+  button.acc{background:none;border:1px solid var(--line);color:var(--dim);
+             border-radius:5px;padding:2px 8px;cursor:pointer;font:inherit;font-size:11px}
+  button.acc:hover{color:var(--ink);border-color:var(--dim)}
+  button.acc.peligro:hover{color:var(--bad);border-color:var(--bad)}
+  input,select{background:#0d1414;border:1px solid var(--line);color:var(--ink);
+               border-radius:5px;padding:5px 7px;font:inherit;font-size:12px;width:100%}
+  .campos{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px}
+  .campos input:nth-child(3){grid-column:1/-1}
+  #aviso{padding:7px 16px;font-size:12px;border-top:1px solid var(--line);
+         color:var(--dim);min-height:32px}
+  #aviso.mal{color:var(--bad)} #aviso.bien{color:var(--acc)}
+  .vacio{color:var(--dim);text-align:center;padding:30px 0;font-size:13px}
+</style>
+
+<div id="red"></div>
+<aside>
+  <header>
+    <h1>El cerebro de Iris</h1>
+    <div id="estado">cargando…</div>
+  </header>
+  <nav>
+    <button class="on" data-p="sel">Selección</button>
+    <button data-p="mem">Memorias</button>
+    <button data-p="gus">Gustos</button>
+  </nav>
+  <div class="panel on" id="p-sel"></div>
+  <div class="panel" id="p-mem"></div>
+  <div class="panel" id="p-gus"></div>
+  <div id="aviso">Clic en un nodo para verlo. Arrastra para mover.</div>
+</aside>
+
+<script>
+const $ = s => document.querySelector(s);
+// Relativo a donde esté servida: en local es "/", en el servidor "/cerebro/".
+const BASE = location.pathname.replace(/\/$/, "");
+const esc = t => String(t ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let red, datos = {entities:[], relations:[]}, seleccion = null;
+
+// La llave viaja en la URL cuando esto se sirve desde internet. Se guarda para
+// añadirla a cada petición: si no, la página cargaría y luego fallaría todo.
+const LLAVE = new URLSearchParams(location.search).get("k") || "";
+const conLlave = r => LLAVE ? r + (r.includes("?") ? "&" : "?") + "k=" + encodeURIComponent(LLAVE) : r;
+
+function avisar(txt, clase=""){ const a=$("#aviso"); a.textContent=txt; a.className=clase; }
+
+async function api(ruta, opciones){
+  const r = await fetch(conLlave(BASE + ruta), opciones);
+  if(!r.ok){ throw new Error((await r.json().catch(()=>({}))).detail || r.statusText); }
+  return r.status === 204 ? null : r.json();
+}
+
+// Un color por tipo de entidad, para que el grafo se lea de un vistazo.
+const COLOR = {Person:"#4fc7b8", Project:"#e8a354", SharedEvent:"#a78bfa",
+               Belief:"#f0907c", EmotionTrigger:"#f59ec7", InsideJoke:"#7dc183",
+               Preference:"#6ba3e8", Unknown:"#8b9e9a"};
+
+async function cargarGrafo(){
+  datos = await api("/api/grafo");
+  const nodos = datos.entities.map(e => ({
+    id:e.id, label:e.label, title:`${e.type} · ${e.degree} conexiones`,
+    color:{background:COLOR[e.type]||COLOR.Unknown, border:"#0d1414"},
+    // El tamaño dice cuánto pesa: lo muy conectado se ve antes.
+    value: e.degree + 1, font:{color:"#e6edeb", size:14}
+  }));
+  const aristas = datos.relations.map((r,i) => ({
+    id:i, from:r.from, to:r.to, label:r.relation, title:r.context||r.relation,
+    arrows:"to", color:{color:"#2a3937", highlight:"#4fc7b8"},
+    font:{color:"#8b9e9a", size:10, strokeWidth:0, align:"middle"}
+  }));
+
+  const cont = $("#red");
+  const opciones = {
+    nodes:{shape:"dot", scaling:{min:10, max:34}, borderWidth:2},
+    edges:{smooth:{type:"continuous"}, length:190},
+    physics:{barnesHut:{gravitationalConstant:-9000, springLength:150}, stabilization:{iterations:180}},
+    interaction:{hover:true, tooltipDelay:150},
+  };
+  if(red){ red.setData({nodes:nodos, edges:aristas}); }
+  else{
+    red = new vis.Network(cont, {nodes:nodos, edges:aristas}, opciones);
+    red.on("click", p => {
+      if(p.nodes.length) mostrarNodo(p.nodes[0]);
+      else if(p.edges.length) mostrarArista(p.edges[0]);
+      else { seleccion=null; panelSeleccion(); }
+    });
+  }
+  if(!datos.entities.length){
+    $("#p-sel").innerHTML = `<div class="vacio">El grafo está vacío.<br>
+      Se llena solo cada 20 mensajes, o puedes crear nodos aquí abajo.</div>` + formNuevo();
+    engancharForm();
+  } else { panelSeleccion(); }
+}
+
+function formNuevo(){
+  return `<div style="margin-top:14px">
+    <div class="meta">Crear una relación</div>
+    <div class="campos">
+      <input id="n-a" placeholder="origen">
+      <input id="n-b" placeholder="destino">
+      <input id="n-rel" placeholder="RELACION (ej: TRABAJA_EN)">
+    </div>
+    <button class="acc" id="n-crear">Crear</button>
+  </div>`;
+}
+function engancharForm(){
+  const b = $("#n-crear"); if(!b) return;
+  b.onclick = async () => {
+    const a=$("#n-a").value.trim(), z=$("#n-b").value.trim(), rel=$("#n-rel").value.trim().toUpperCase();
+    if(!a||!z||!rel) return avisar("Faltan campos", "mal");
+    try{
+      await api("/api/relacion",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({from_name:a, relation:rel, to_name:z, context:""})});
+      avisar(`${a} —${rel}→ ${z}`, "bien"); cargarGrafo();
+    }catch(e){ avisar(e.message,"mal"); }
+  };
+}
+
+function panelSeleccion(){
+  if(!seleccion){
+    $("#p-sel").innerHTML = `<div class="vacio">Nada seleccionado.<br>
+      Clic en un nodo o en una flecha.</div>` + formNuevo();
+    engancharForm(); return;
+  }
+}
+
+function mostrarNodo(id){
+  seleccion = id;
+  const ent = datos.entities.find(e => e.id === id);
+  const conectadas = datos.relations.filter(r => r.from===id || r.to===id);
+  $("#p-sel").innerHTML = `
+    <div class="fila">
+      <div class="meta"><span>${esc(ent.type)}</span><span>${conectadas.length} conexiones</span></div>
+      <input id="ent-nombre" value="${esc(id)}">
+      <div style="margin-top:7px;display:flex;gap:6px">
+        <button class="acc" id="ent-guardar">Renombrar</button>
+        <button class="acc peligro" id="ent-borrar">Borrar nodo</button>
+      </div>
+      <div class="meta" style="margin-top:7px">Renombrar a un nombre que ya existe los <b>fusiona</b>.</div>
+    </div>
+    ${conectadas.map(r => `<div class="fila">
+        <div class="meta"><span>${esc(r.from)} —${esc(r.relation)}→ ${esc(r.to)}</span>
+        <button class="acc peligro" data-del="${esc(r.from)}|${esc(r.relation)}|${esc(r.to)}">×</button></div>
+        ${r.context ? `<div class="txt" style="font-size:12px;color:var(--dim)">${esc(r.context)}</div>`:""}
+      </div>`).join("")}
+    ${formNuevo()}`;
+  engancharForm();
+
+  $("#ent-guardar").onclick = async () => {
+    const nuevo = $("#ent-nombre").value.trim();
+    if(!nuevo || nuevo === id) return;
+    try{
+      await api("/api/entidad/renombrar",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({old_name:id, new_name:nuevo})});
+      avisar(`«${id}» → «${nuevo}»`,"bien"); seleccion=null; cargarGrafo();
+    }catch(e){ avisar(e.message,"mal"); }
+  };
+  $("#ent-borrar").onclick = async () => {
+    if(!confirm(`Borrar «${id}» y sus ${conectadas.length} relaciones?\n\nNo hay deshacer.`)) return;
+    try{
+      const r = await api(`/api/entidad/${encodeURIComponent(id)}`,{method:"DELETE"});
+      avisar(`Borrado, con ${r.relaciones_borradas} relaciones`,"bien"); seleccion=null; cargarGrafo();
+    }catch(e){ avisar(e.message,"mal"); }
+  };
+  document.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
+    const [a,rel,z] = b.dataset.del.split("|");
+    if(!confirm(`Borrar  ${a} —${rel}→ ${z}?`)) return;
+    try{
+      await api("/api/relacion",{method:"DELETE",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({from_name:a, relation:rel, to_name:z})});
+      avisar("Relación borrada","bien"); cargarGrafo();
+    }catch(e){ avisar(e.message,"mal"); }
+  });
+}
+
+function mostrarArista(i){
+  const r = datos.relations[i]; if(!r) return;
+  seleccion = null;
+  $("#p-sel").innerHTML = `<div class="fila">
+      <div class="meta"><span>relación</span>
+      <button class="acc peligro" id="ar-borrar">Borrar</button></div>
+      <div class="txt"><b>${esc(r.from)}</b> —${esc(r.relation)}→ <b>${esc(r.to)}</b></div>
+      ${r.context ? `<div class="txt" style="margin-top:6px;color:var(--dim);font-size:12px">${esc(r.context)}</div>`:""}
+      ${r.date ? `<div class="meta" style="margin-top:6px">${esc(r.date)}</div>`:""}
+    </div>`;
+  $("#ar-borrar").onclick = async () => {
+    if(!confirm(`Borrar  ${r.from} —${r.relation}→ ${r.to}?`)) return;
+    try{
+      await api("/api/relacion",{method:"DELETE",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({from_name:r.from, relation:r.relation, to_name:r.to})});
+      avisar("Relación borrada","bien"); cargarGrafo();
+    }catch(e){ avisar(e.message,"mal"); }
+  };
+}
+
+async function cargarMemorias(){
+  const ms = await api("/api/memorias");
+  $("#p-mem").innerHTML = ms.length ? ms.map(m => `
+    <div class="fila" data-id="${m.id}">
+      <div class="meta">
+        <span>${esc(m.category)}${m.expires_at ? " · caduca "+esc(m.expires_at) : ""}</span>
+        <span><button class="acc" data-edit="${m.id}">editar</button>
+              <button class="acc peligro" data-borra="${m.id}">×</button></span>
+      </div>
+      <div class="txt" id="m-${m.id}">${esc(m.content)}</div>
+    </div>`).join("")
+    : `<div class="vacio">Sin memorias todavía.<br>Se extraen solas cada 20 mensajes.</div>`;
+
+  document.querySelectorAll("[data-borra]").forEach(b => b.onclick = async () => {
+    if(!confirm("Olvidar esta memoria? No hay deshacer.")) return;
+    try{ await api(`/api/memoria/${b.dataset.borra}`,{method:"DELETE"});
+         avisar("Olvidada","bien"); cargarMemorias(); }
+    catch(e){ avisar(e.message,"mal"); }
+  });
+  document.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => {
+    const div = $("#m-"+b.dataset.edit);
+    const editando = div.isContentEditable;
+    div.contentEditable = !editando;
+    b.textContent = editando ? "editar" : "guardar";
+    if(editando){
+      api(`/api/memoria/${b.dataset.edit}`,{method:"PATCH",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({content: div.textContent.trim()})})
+        .then(()=>avisar("Corregida — el vector se reindexó","bien"))
+        .catch(e=>avisar(e.message,"mal"));
+    } else { div.focus(); avisar("Editando. Pulsa guardar al terminar."); }
+  });
+}
+
+async function cargarGustos(){
+  const gs = await api("/api/gustos");
+  $("#p-gus").innerHTML = gs.length ? gs.map(g => {
+    const pos = g.valence >= 0;
+    return `<div class="fila">
+      <div class="meta"><span>${esc(g.kind)}</span>
+        <span style="color:${pos?"var(--acc)":"var(--bad)"}">${pos?"+":""}${g.valence}</span></div>
+      <div class="txt">${esc(g.subject)}</div>
+      <div class="meta" style="margin-top:4px">fuerza ${g.strength} · ${esc(g.intensity)}</div>
+    </div>`;
+  }).join("") : `<div class="vacio">Todavía no se ha formado ningún gusto.<br>
+      Salen de las conversaciones, cada 20 mensajes.</div>`;
+}
+
+async function cargarEstado(){
+  const s = await api("/api/estado");
+  $("#estado").textContent = `${s.mood} · confianza ${s.trust}/100 (${s.stage}) · energía ${s.energy}`;
+}
+
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x===b));
+  document.querySelectorAll(".panel").forEach(p =>
+    p.classList.toggle("on", p.id === "p-"+b.dataset.p));
+  if(b.dataset.p==="mem") cargarMemorias();
+  if(b.dataset.p==="gus") cargarGustos();
+});
+
+cargarEstado(); cargarGrafo();
+setInterval(cargarEstado, 15000);
+</script>
