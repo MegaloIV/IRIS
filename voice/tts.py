@@ -107,15 +107,25 @@ class TTSEngine:
                     return audio_float, 24000
                 
                 elif response.status_code in [401, 402, 429]:
+                    # Lo que dice ElevenLabs, no lo que yo supongo. Un 401 aquí
+                    # tanto puede ser una clave revocada como una voz clonada que
+                    # tu plan no permite, y adivinar mandó a buscar tres veces al
+                    # sitio equivocado.
+                    try:
+                        d = response.json().get("detail", {})
+                        detalle = d.get("message") or d.get("status") or ""
+                    except Exception:
+                        detalle = (response.text or "")[:120]
                     # Los tres rotan, pero no significan lo mismo y decirlo mal
                     # manda a buscar el problema donde no está: un 401 no se
                     # arregla esperando a que se renueve la cuota.
-                    motivo = {401: "clave inválida o revocada",
+                    motivo = {401: "no autorizada",
                               402: "sin créditos",
                               429: "límite de peticiones"}[response.status_code]
                     logging.warning(
                         f"[TTS] Key {self.current_key_index + 1} rechazada — "
                         f"{motivo} (HTTP {response.status_code}). Rotando..."
+                        + (f"\n       ElevenLabs dice: {detalle}" if detalle else "")
                     )
                     self._rotate_key()
                 else:

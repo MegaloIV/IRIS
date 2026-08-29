@@ -660,25 +660,39 @@ class SupabaseJournalStorage(BaseJournalStorage):
 # todo el traversal sale en una sola ida y vuelta.
 
 
-def _format_graph_rows(rows: list[dict]) -> str:
-    """Formatea filas de traversal como las lee el system prompt."""
-    seen: set[str] = set()
-    lines: list[str] = []
+def _format_graph_rows(rows: list[dict], limite: int = 14) -> str:
+    """
+    Formatea el traversal para el system prompt, con techo.
+
+    El techo no es cosmético. El recorrido a profundidad 2 cruza cada vecino con
+    todos los demás, así que un grafo de quince aristas producía cincuenta líneas
+    del tipo "Matias LE_ABURRE → SE_SIENTE Aburrimiento", que no es un camino con
+    sentido: son dos aristas sin relación encadenadas por un nodo común.
+
+    El daño era real y medido: ese bloque llegó a ocupar 6.000 caracteres —más
+    que toda su personalidad— repitiendo nueve veces "Iris odia la alabanza". Con
+    eso delante rechazaba cualquier cosa amable que le dijeran. Lo que la volvió
+    seca no fue su carácter: era el ruido tapándolo.
+    """
+    vistos: set = set()
+    directas: list[str] = []
+    indirectas: list[str] = []
 
     for row in rows:
         chain        = row.get("relation_chain") or []
         relation_str = " → ".join(chain) if chain else row.get("relation", "?")
+        hops         = row.get("hops", 1)
 
-        # Un salto recorrido al revés se imprime en su sentido real. Con varios
-        # saltos ya es un camino y no una afirmación, así que se deja como está.
         origen, destino = row["source"], row["target"]
-        if row.get("invertida") and row.get("hops", 1) == 1:
+        if row.get("invertida") and hops == 1:
             origen, destino = destino, origen
 
-        key = f"{origen}-{relation_str}-{destino}"
-        if key in seen:
+        # Se deduplica por el HECHO, no por el camino: da igual por cuántas rutas
+        # se llegue a "Iris odia la alabanza", sigue siendo una sola cosa.
+        clave = (origen, relation_str, destino) if hops == 1 else (destino,)
+        if clave in vistos:
             continue
-        seen.add(key)
+        vistos.add(clave)
 
         meta: list[str] = []
         if row.get("rel_date"):
@@ -689,16 +703,15 @@ def _format_graph_rows(rows: list[dict]) -> str:
         if isinstance(history, list) and history:
             meta.append(f"antes: {history[-1]}")
 
-        hops     = row.get("hops", 1)
-        prefix   = "  └" if hops and hops > 1 else "-"
         meta_str = f" [{' | '.join(meta)}]" if meta else ""
-        lines.append(f"{prefix} {origen} {relation_str} {destino}{meta_str}")
+        linea    = f"- {origen} {relation_str} {destino}{meta_str}"
+        (directas if hops == 1 else indirectas).append(linea)
 
-    return "\n".join(lines)
+    # Las de un salto primero: son afirmaciones. Las de dos solo sugieren que dos
+    # cosas están conectadas, y entran únicamente si sobra sitio.
+    return "\n".join(directas[:limite] + indirectas[: max(0, limite - len(directas))])
 
 
-# Aristas en ambos sentidos: así el recorrido es no dirigido, como el `-[]-` de Cypher.
-# {rel_filter} se sustituye por el filtro de tipos de relación, o por nada.
 _WALK_SQL = """
 WITH RECURSIVE edges AS (
     -- Las aristas se recorren en los dos sentidos: para llegar a Lucía desde
